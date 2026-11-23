@@ -12,6 +12,8 @@ dependencies:
   # 兩端共用的邏輯。用相對路徑，所以要從 cam-board 這個 meta repo 裡建置。
   cam_board_core:
     path: ../cam-board-core
+  bonsoir: ^7.1.6
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:
