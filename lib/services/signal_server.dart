@@ -1,21 +1,34 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cam_board_core/cam_board_core.dart';
 
-/// 看板端讓鄉民端連進來的入口。
+/// 某個鄉民端送來的一則訊息。
+typedef ViewerMessage = ({String viewerId, SignalMessage message});
+
+/// 看板端讓鄉民端連進來、互傳訊息的入口。
 abstract interface class SignalServer {
+  /// 鄉民端送來的訊息。
+  Stream<ViewerMessage> get messages;
+
+  /// 某個鄉民端的連線斷了（它自己關掉，或網路斷了）。
+  Stream<String> get disconnections;
+
   /// 開始接受連線，回傳實際使用的埠。
   Future<int> start({required String boardName});
 
-  /// 停止接受連線，並告訴已經連上的鄉民端看板撤銷註冊了。
+  /// 送一則訊息給某個鄉民端。它已經斷線時不做任何事。
+  void send(String viewerId, SignalMessage message);
+
+  /// 告訴某個鄉民端結束了，並關掉它的連線。
+  Future<void> dismiss(String viewerId, ByeReason reason);
+
+  /// 停止接受連線，並告訴所有連著的鄉民端看板撤銷註冊了。
   /// 沒有啟動時呼叫也不會出錯。
   Future<void> stop();
 }
 
 /// 用 WebSocket 實作。
-///
-/// 目前只做到「連上就報上名字」，讓鄉民端確認這裡真的是看板。
-/// 交換視訊連線資訊的部分還沒做。
 class WebSocketSignalServer implements SignalServer {
   WebSocketSignalServer({this.preferredPort = defaultBoardPort});
 
@@ -23,7 +36,16 @@ class WebSocketSignalServer implements SignalServer {
   final int preferredPort;
 
   HttpServer? _server;
-  final Set<WebSocket> _sockets = {};
+  final Map<String, WebSocket> _sockets = {};
+  final _messages = StreamController<ViewerMessage>.broadcast();
+  final _disconnections = StreamController<String>.broadcast();
+  int _nextId = 1;
+
+  @override
+  Stream<ViewerMessage> get messages => _messages.stream;
+
+  @override
+  Stream<String> get disconnections => _disconnections.stream;
 
   @override
   Future<int> start({required String boardName}) async {
@@ -37,16 +59,34 @@ class WebSocketSignalServer implements SignalServer {
         return;
       }
       final socket = await WebSocketTransformer.upgrade(request);
-      _sockets.add(socket);
+      final viewerId = 'viewer-${_nextId++}';
+      _sockets[viewerId] = socket;
       socket.add(HelloMessage(name: boardName).encode());
       socket.listen(
-        (_) {},
-        onDone: () => _sockets.remove(socket),
-        onError: (_) => _sockets.remove(socket),
+        (raw) => _receive(viewerId, raw),
+        onDone: () => _dropped(viewerId),
+        onError: (_) => _dropped(viewerId),
         cancelOnError: true,
       );
     });
     return server.port;
+  }
+
+  void _receive(String viewerId, Object? raw) {
+    if (raw is! String) return;
+    final SignalMessage message;
+    try {
+      message = SignalMessage.decode(raw);
+    } on FormatException {
+      // 看不懂的訊息丟掉就好，不能讓一則壞訊息弄斷整條連線。
+      return;
+    }
+    _messages.add((viewerId: viewerId, message: message));
+  }
+
+  /// 連線從對方那邊斷掉。我們主動關掉的連線已經先從 [_sockets] 移除，不會再通報。
+  void _dropped(String viewerId) {
+    if (_sockets.remove(viewerId) != null) _disconnections.add(viewerId);
   }
 
   Future<HttpServer> _bind() async {
@@ -59,14 +99,23 @@ class WebSocketSignalServer implements SignalServer {
   }
 
   @override
+  void send(String viewerId, SignalMessage message) =>
+      _sockets[viewerId]?.add(message.encode());
+
+  @override
+  Future<void> dismiss(String viewerId, ByeReason reason) async {
+    final socket = _sockets.remove(viewerId);
+    if (socket == null) return;
+    socket.add(ByeMessage(reason).encode());
+    await socket.close();
+  }
+
+  @override
   Future<void> stop() async {
     final server = _server;
     _server = null;
-    final sockets = _sockets.toList();
-    _sockets.clear();
-    for (final socket in sockets) {
-      socket.add(const ByeMessage(ByeReason.boardUnregistered).encode());
-      await socket.close();
+    for (final viewerId in _sockets.keys.toList()) {
+      await dismiss(viewerId, ByeReason.boardUnregistered);
     }
     await server?.close(force: true);
   }

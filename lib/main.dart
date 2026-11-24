@@ -3,11 +3,15 @@ import 'package:flutter/material.dart';
 import 'board_controller.dart';
 import 'screens/board_home.dart';
 import 'services/board_advertiser.dart';
+import 'services/camera_source.dart';
 import 'services/lan_address_finder.dart';
 import 'services/name_store.dart';
+import 'services/screen_awake.dart';
 import 'services/signal_server.dart';
+import 'services/viewer_link.dart';
 
 void main() {
+  final camera = WebRtcCameraSource();
   runApp(
     CamBoardApp(
       controller: BoardController(
@@ -15,6 +19,9 @@ void main() {
         server: WebSocketSignalServer(),
         nameStore: SharedPreferencesNameStore(),
         findAddress: findLanAddress,
+        camera: camera,
+        createLink: () => WebRtcViewerLink.create(camera),
+        screenAwake: WakelockScreenAwake(),
       ),
     ),
   );

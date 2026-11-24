@@ -12,40 +12,133 @@ void main() {
   setUp(() => server = WebSocketSignalServer(preferredPort: 0));
   tearDown(() => server.stop());
 
-  Future<WebSocket> connect(int port) =>
-      WebSocket.connect('ws://127.0.0.1:$port');
+  /// 一個扮演鄉民端的連線，把收到的訊息依序記下來。
+  Future<({WebSocket socket, List<SignalMessage> received, Future<void> done})>
+  connect(int port) async {
+    final socket = await WebSocket.connect('ws://127.0.0.1:$port');
+    final received = <SignalMessage>[];
+    final done = socket
+        .map((raw) => SignalMessage.decode(raw as String))
+        .forEach(received.add);
+    return (socket: socket, received: received, done: done);
+  }
+
+  /// 等訊息在本機的連線上送到。
+  Future<void> settle() =>
+      Future<void>.delayed(const Duration(milliseconds: 100));
 
   test('連上之後第一則訊息是看板的名字', () async {
     final port = await server.start(boardName: '教室白板');
-    final socket = await connect(port);
+    final viewer = await connect(port);
+    await settle();
 
-    final hello = SignalMessage.decode(await socket.first as String);
-    expect(hello, isA<HelloMessage>());
-    expect((hello as HelloMessage).name, '教室白板');
+    final hello = viewer.received.single as HelloMessage;
+    expect(hello.name, '教室白板');
     expect(hello.isCompatible, isTrue);
   });
 
-  test('停止時通知已經連上的鄉民端', () async {
+  test('鄉民端送來的訊息會帶著它的編號轉出來，不同鄉民端編號不同', () async {
     final port = await server.start(boardName: '教室白板');
-    final socket = await connect(port);
-    final messages = <SignalMessage>[];
-    final done = socket
-        .map((raw) => SignalMessage.decode(raw as String))
-        .forEach(messages.add);
+    final incoming = <ViewerMessage>[];
+    server.messages.listen(incoming.add);
 
-    // 等 hello 送到，確定伺服器已經登記這條連線。
-    await Future<void>.delayed(const Duration(milliseconds: 100));
+    final first = await connect(port);
+    final second = await connect(port);
+    first.socket.add(const JoinMessage().encode());
+    await settle();
+    second.socket.add(const AnswerMessage(sdp: 'v=0').encode());
+    await settle();
+
+    expect(incoming, hasLength(2));
+    expect(incoming[0].message, isA<JoinMessage>());
+    expect(incoming[1].message, isA<AnswerMessage>());
+    expect(incoming[0].viewerId, isNot(incoming[1].viewerId));
+  });
+
+  test('看不懂的訊息被丟掉，連線不受影響', () async {
+    final port = await server.start(boardName: '教室白板');
+    final incoming = <ViewerMessage>[];
+    server.messages.listen(incoming.add);
+
+    final viewer = await connect(port);
+    viewer.socket.add('這不是合法的訊息');
+    viewer.socket.add(const JoinMessage().encode());
+    await settle();
+
+    expect(incoming.single.message, isA<JoinMessage>());
+  });
+
+  test('可以送訊息給指定的鄉民端，其他人收不到', () async {
+    final port = await server.start(boardName: '教室白板');
+    final incoming = <ViewerMessage>[];
+    server.messages.listen(incoming.add);
+    final first = await connect(port);
+    final second = await connect(port);
+    first.socket.add(const JoinMessage().encode());
+    await settle();
+
+    server.send(incoming.single.viewerId, const OfferMessage(sdp: 'v=0'));
+    await settle();
+
+    expect(first.received.last, isA<OfferMessage>());
+    expect(second.received.whereType<OfferMessage>(), isEmpty);
+  });
+
+  test('鄉民端自己斷線時會通報', () async {
+    final port = await server.start(boardName: '教室白板');
+    final dropped = <String>[];
+    server.disconnections.listen(dropped.add);
+
+    final viewer = await connect(port);
+    await settle();
+    await viewer.socket.close();
+    await settle();
+
+    expect(dropped, hasLength(1));
+  });
+
+  test('看板端主動結束某個鄉民端：對方收到原因，而且不會再通報斷線', () async {
+    final port = await server.start(boardName: '教室白板');
+    final incoming = <ViewerMessage>[];
+    final dropped = <String>[];
+    server.messages.listen(incoming.add);
+    server.disconnections.listen(dropped.add);
+    final viewer = await connect(port);
+    viewer.socket.add(const JoinMessage().encode());
+    await settle();
+
+    await server.dismiss(incoming.single.viewerId, ByeReason.boardStopped);
+    await viewer.done;
+    await settle();
+
+    expect((viewer.received.last as ByeMessage).reason, ByeReason.boardStopped);
+    expect(dropped, isEmpty);
+  });
+
+  test('停止時通知所有連著的鄉民端看板撤銷註冊了', () async {
+    final port = await server.start(boardName: '教室白板');
+    final first = await connect(port);
+    final second = await connect(port);
+    await settle();
+
     await server.stop();
-    await done;
+    await Future.wait([first.done, second.done]);
 
-    expect(messages.last, isA<ByeMessage>());
-    expect((messages.last as ByeMessage).reason, ByeReason.boardUnregistered);
+    for (final viewer in [first, second]) {
+      expect(
+        (viewer.received.last as ByeMessage).reason,
+        ByeReason.boardUnregistered,
+      );
+    }
   });
 
   test('停止之後連不上', () async {
     final port = await server.start(boardName: '教室白板');
     await server.stop();
-    expect(connect(port), throwsA(isA<SocketException>()));
+    expect(
+      WebSocket.connect('ws://127.0.0.1:$port'),
+      throwsA(isA<SocketException>()),
+    );
   });
 
   test('想用的埠被佔用時改用別的埠', () async {
@@ -55,19 +148,17 @@ void main() {
 
     final port = await server.start(boardName: '教室白板');
     expect(port, isNot(occupied.port));
-    final socket = await connect(port);
-    expect(
-      SignalMessage.decode(await socket.first as String),
-      isA<HelloMessage>(),
-    );
+    final viewer = await connect(port);
+    await settle();
+    expect(viewer.received.single, isA<HelloMessage>());
   });
 
   test('可以停止後再啟動', () async {
     await server.start(boardName: '第一次');
     await server.stop();
     final port = await server.start(boardName: '第二次');
-    final socket = await connect(port);
-    final hello = SignalMessage.decode(await socket.first as String);
-    expect((hello as HelloMessage).name, '第二次');
+    final viewer = await connect(port);
+    await settle();
+    expect((viewer.received.single as HelloMessage).name, '第二次');
   });
 }

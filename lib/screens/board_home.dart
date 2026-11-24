@@ -18,9 +18,11 @@ class BoardHome extends StatelessWidget {
           padding: const EdgeInsets.all(24),
           child: ListenableBuilder(
             listenable: controller,
-            builder: (context, _) => controller.state == BoardState.unregistered
-                ? _RegisterForm(controller: controller)
-                : _Registered(controller: controller),
+            builder: (context, _) => switch (controller.state) {
+              BoardState.unregistered => _RegisterForm(controller: controller),
+              BoardState.waiting => _Registered(controller: controller),
+              BoardState.showing => _Showing(controller: controller),
+            },
           ),
         ),
       ),
@@ -121,6 +123,65 @@ class _Registered extends StatelessWidget {
         OutlinedButton(
           onPressed: controller.busy ? null : controller.unregister,
           child: const Text('撤銷註冊'),
+        ),
+      ],
+    );
+  }
+}
+
+/// 有鄉民端正在看：顯示鏡頭預覽、人數，以及鏡頭控制。
+class _Showing extends StatelessWidget {
+  const _Showing({required this.controller});
+
+  final BoardController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          '${controller.viewerCount} 個鄉民端正在看',
+          style: Theme.of(context).textTheme.titleMedium,
+          textAlign: TextAlign.center,
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) => GestureDetector(
+              key: const Key('preview'),
+              onScaleStart: (_) => controller.pinchStarted(),
+              onScaleUpdate: (details) {
+                // 單指拖曳也會觸發這個手勢，只有兩指以上才算縮放。
+                if (details.pointerCount >= 2) {
+                  controller.pinchUpdated(details.scale);
+                }
+              },
+              onTapUp: (details) => controller.focusAt(
+                details.localPosition.dx / constraints.maxWidth,
+                details.localPosition.dy / constraints.maxHeight,
+              ),
+              child: controller.camera.buildPreview(),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: controller.switchCamera,
+                child: const Text('切換鏡頭'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton(
+                onPressed: controller.stopShowing,
+                child: const Text('不給看了'),
+              ),
+            ),
+          ],
         ),
       ],
     );
