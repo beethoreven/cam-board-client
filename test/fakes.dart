@@ -90,6 +90,9 @@ class FakeNameStore implements NameStore {
 class FakeCamera implements CameraSource {
   bool permissionDenied = false;
   bool failOnOpen = false;
+
+  /// 模擬這支手機的鏡頭不支援縮放、對焦、切換。
+  bool controlsUnsupported = false;
   int switchCount = 0;
   final List<double> zooms = [];
   final List<(double, double)> focusPoints = [];
@@ -112,13 +115,26 @@ class FakeCamera implements CameraSource {
   Future<void> close() async => isOpen = false;
 
   @override
-  Future<void> switchCamera() async => switchCount++;
+  Future<void> switchCamera() async {
+    _failIfUnsupported();
+    switchCount++;
+  }
 
   @override
-  Future<void> setZoom(double zoom) async => zooms.add(zoom);
+  Future<void> setZoom(double zoom) async {
+    _failIfUnsupported();
+    zooms.add(zoom);
+  }
 
   @override
-  Future<void> focusAt(double x, double y) async => focusPoints.add((x, y));
+  Future<void> focusAt(double x, double y) async {
+    _failIfUnsupported();
+    focusPoints.add((x, y));
+  }
+
+  void _failIfUnsupported() {
+    if (controlsUnsupported) throw Exception('這支手機的鏡頭不支援');
+  }
 
   @override
   Widget buildPreview() =>

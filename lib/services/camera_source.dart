@@ -104,7 +104,10 @@ class WebRtcCameraSource implements CameraSource {
   Future<void> focusAt(double x, double y) async {
     final track = _track;
     if (track == null) return;
-    await Helper.setFocusMode(track, CameraFocusMode.auto);
+    // 這裡刻意不先呼叫 Helper.setFocusMode。flutter_webrtc 1.6.3 的 Android 端
+    // 讀的參數名稱是 "mode"，Dart 端送的卻是 "focusMode"，所以它在 Android 上
+    // 一定會失敗（2026-11-25 實機確認）。只指定對焦點就夠用。
+    // 套件修好這個問題之後，如果需要「對焦後鎖定」再把 setFocusMode 加回來。
     await Helper.setFocusPoint(track, Point(x, y));
   }
 

@@ -330,6 +330,19 @@ void main() {
       expect(h.controller.zoom, minZoom);
     });
 
+    test('鏡頭不支援這些控制時不會出錯，觀看照常進行', () async {
+      h.camera.controlsUnsupported = true;
+
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(2);
+      await h.controller.focusAt(0.5, 0.5);
+      await h.controller.switchCamera();
+
+      expect(h.controller.state, BoardState.showing);
+      expect(h.controller.viewerCount, 1);
+      expect(h.camera.isOpen, isTrue);
+    });
+
     test('所有人離開後倍率回到 1 倍', () async {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(3);

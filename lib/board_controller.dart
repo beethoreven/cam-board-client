@@ -129,7 +129,7 @@ class BoardController extends ChangeNotifier {
   }
 
   Future<void> switchCamera() async {
-    await _camera.switchCamera();
+    if (!await _tryCameraControl(_camera.switchCamera)) return;
     // 換了一顆鏡頭，倍率從頭開始。
     _zoom = minZoom;
     notifyListeners();
@@ -144,12 +144,26 @@ class BoardController extends ChangeNotifier {
     if (next == _zoom) return;
     _zoom = next;
     notifyListeners();
-    await _camera.setZoom(next);
+    await _tryCameraControl(() => _camera.setZoom(next));
   }
 
   /// 點一下畫面對焦。[x]、[y] 是 0 到 1 的比例。
-  Future<void> focusAt(double x, double y) =>
-      _camera.focusAt(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+  Future<void> focusAt(double x, double y) => _tryCameraControl(
+    () => _camera.focusAt(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)),
+  );
+
+  /// 執行一個鏡頭控制，回傳有沒有成功。
+  ///
+  /// 縮放、對焦、切換鏡頭能不能用，取決於這支手機的鏡頭。做不到時畫面照常
+  /// 傳送，不能因為一個做不到的控制就讓整個觀看出錯。
+  Future<bool> _tryCameraControl(Future<void> Function() control) async {
+    try {
+      await control();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> _onMessage(ViewerMessage incoming) async {
     final (:viewerId, :message) = incoming;

@@ -40,6 +40,17 @@ class WebRtcViewerLink implements ViewerLink {
   void Function()? _onLost;
   bool _closed = false;
 
+  /// 鄉民端的網路路徑可能比它回覆的連線資訊還早處理到，先留著。
+  late final CandidateGate _candidates = CandidateGate(
+    (candidate) => _connection.addCandidate(
+      RTCIceCandidate(
+        candidate.candidate,
+        candidate.sdpMid,
+        candidate.sdpMLineIndex,
+      ),
+    ),
+  );
+
   static Future<WebRtcViewerLink> create(WebRtcCameraSource camera) async {
     final stream = camera.stream;
     if (stream == null) throw StateError('鏡頭還沒開，不能建立視訊連線');
@@ -101,6 +112,7 @@ class WebRtcViewerLink implements ViewerLink {
     await _connection.setRemoteDescription(
       RTCSessionDescription(sdp, 'answer'),
     );
+    await _candidates.open();
     await _preferResolution();
   }
 
@@ -121,13 +133,7 @@ class WebRtcViewerLink implements ViewerLink {
 
   @override
   Future<void> addCandidate(CandidateMessage candidate) =>
-      _connection.addCandidate(
-        RTCIceCandidate(
-          candidate.candidate,
-          candidate.sdpMid,
-          candidate.sdpMLineIndex,
-        ),
-      );
+      _candidates.add(candidate);
 
   @override
   Future<void> close() async {
