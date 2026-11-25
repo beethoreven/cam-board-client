@@ -203,7 +203,7 @@ void main() {
       expect(h.camera.focusSteps.last, isA<HoldFocus>());
     });
 
-    testWidgets('按「拍照」把照片傳給抄錄中的鄉民端，存好後跳出提示', (tester) async {
+    testWidgets('按「拍照」把照片傳給抄錄中的鄉民端，鄉民端收到後跳出提示', (tester) async {
       await pumpApp(tester);
       await register(tester);
       await viewerJoins(tester, 'mac-1');
@@ -214,7 +214,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(h.server.sentBytes['mac-1'], hasLength(1));
 
-      h.server.receive('mac-1', const ShotSavedMessage(id: 1));
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
       await tester.pump();
       await tester.pump();
 

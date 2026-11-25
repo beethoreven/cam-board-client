@@ -626,8 +626,10 @@ void main() {
 
       expect(h.camera.captureCount, 1);
       final shot = h.server.sent['mac-2']!.last as ShotMessage;
-      expect(shot.bytes, 3);
-      expect(h.server.sentBytes['mac-2']!.single, [1, 2, 3]);
+      // 說明裡帶著畫面的寬、高和要轉幾度，後面的資料是還沒壓縮的畫面。
+      expect((shot.width, shot.height, shot.rotation), (4, 2, 90));
+      expect(h.server.sentBytes['mac-2']!.single, h.camera.frame!.i420);
+      expect(h.server.sentBytes['mac-2']!.single, hasLength(shot.bytes));
       expect(h.server.sentBytes['mac-1'], isNull);
       expect(h.server.sent['mac-1'], isNot(contains(isA<ShotMessage>())));
     });
@@ -663,13 +665,13 @@ void main() {
       expect(h.camera.captureCount, 0);
     });
 
-    test('鄉民端說存好了，才跳出誰抄錄了的提示', () async {
+    test('鄉民端說收到了，才跳出誰抄錄了的提示', () async {
       await h.joinRecording('mac-1', name: '阿明');
       await h.controller.takeShot();
       await pumpEventQueue();
       expect(notices, isEmpty);
 
-      h.server.receive('mac-1', const ShotSavedMessage(id: 1));
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
       await pumpEventQueue();
 
       expect(notices, ['阿明抄錄了這個內容']);
@@ -677,7 +679,7 @@ void main() {
 
     test('拍照失敗時提示，而且之後還能再拍', () async {
       await h.joinRecording('mac-1', name: '阿明');
-      h.camera.png = null;
+      h.camera.frame = null;
       await h.controller.takeShot();
       await pumpEventQueue();
 

@@ -1,8 +1,6 @@
 package tw.com.tutorarthur.camboard.client
 
 import android.app.Activity
-import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.graphics.Rect
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -26,8 +24,7 @@ import org.webrtc.CameraEnumerationAndroid
 import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoTrack
-import java.io.ByteArrayOutputStream
-import java.util.concurrent.Executors
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -36,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 為什麼不用 flutter_webrtc 提供的：它在 Android 上設定縮放或對焦點時，都是把鏡頭的
  * 設定整個換掉，而且各自只帶自己那一項，所以設定對焦會讓縮放掉回 1 倍；它也沒有真的
  * 觸發對焦。它的擷取功能存的是 JPEG，不是沒有壓縮的圖。這裡把縮放和對焦放在同一次
- * 設定裡，並且自己把畫面轉成 PNG。
+ * 設定裡，並且自己把鏡頭的畫面原樣交出去（轉成 PNG 由鄉民端做）。
  *
  * 這段程式要用到 flutter_webrtc 和 WebRTC 沒有公開的欄位（用反射取得），是照
  * flutter_webrtc 1.6.3（WebRTC SDK 150.7871.04）寫的。套件升版後如果欄位改了名字，
@@ -58,13 +55,12 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor()
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         try {
             when (call.method) {
                 "apply" -> apply(call, result)
-                "capturePng" -> capturePng(call, result)
+                "captureFrame" -> captureFrame(call, result)
                 else -> result.notImplemented()
             }
         } catch (e: Throwable) {
@@ -370,11 +366,12 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
     }
 
     /**
-     * 擷取鏡頭的下一張畫面，轉成 PNG。
+     * 擷取鏡頭的下一張畫面，原樣交出去：不換色彩格式、不轉正、不壓縮。
      *
-     * 這張畫面還沒經過視訊壓縮，而且已經轉成正的。回傳 PNG 的內容。
+     * 這些事之前都在手機上做，一張要 1.2～1.7 秒；現在交給鄉民端的電腦做。
+     * 回傳寬、高、要順時針轉幾度才是正的，以及畫面的內容（格式見 [pack]）。
      */
-    private fun capturePng(call: MethodCall, result: MethodChannel.Result) {
+    private fun captureFrame(call: MethodCall, result: MethodChannel.Result) {
         val trackId = call.argument<String>("trackId")!!
         val plugin = FlutterWebRTCPlugin.sharedSingleton ?: error("視訊套件還沒啟動")
         val track = plugin.getLocalTrack(trackId)?.track as? VideoTrack ?: error("找不到這個鏡頭畫面")
@@ -390,22 +387,14 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
             if (!taken.compareAndSet(false, true)) return@VideoSink
             main.post { track.removeSink(sink) }
             try {
-                val picture = Picture.copyOf(frame)
-                worker.execute {
-                    try {
-                        val started = System.currentTimeMillis()
-                        val png = picture.toPng()
-                        Log.i(
-                            TAG,
-                            "capture ${picture.width}x${picture.height} rotation=${picture.rotation} " +
-                                "png=${png.size} bytes in ${System.currentTimeMillis() - started} ms",
-                        )
-                        finish { result.success(png) }
-                    } catch (e: Throwable) {
-                        Log.e(TAG, "轉成 PNG 失敗", e)
-                        finish { result.error("camera_control", e.message ?: e.toString(), null) }
-                    }
-                }
+                val started = System.currentTimeMillis()
+                val reply = pack(frame)
+                Log.i(
+                    TAG,
+                    "capture ${reply["width"]}x${reply["height"]} rotation=${reply["rotation"]} " +
+                        "raw=${(reply["bytes"] as ByteArray).size} bytes in ${System.currentTimeMillis() - started} ms",
+                )
+                finish { result.success(reply) }
             } catch (e: Throwable) {
                 Log.e(TAG, "擷取畫面失敗", e)
                 finish { result.error("camera_control", e.message ?: e.toString(), null) }
@@ -420,69 +409,48 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
         }, FRAME_TIMEOUT_MS)
     }
 
-    /** 一張畫面的亮度與色彩資料（從 WebRTC 的畫面複製出來，之後就不依賴它了）。 */
-    private class Picture(
-        val width: Int,
-        val height: Int,
-        val rotation: Int,
-        private val y: ByteArray,
-        private val u: ByteArray,
-        private val v: ByteArray,
-        private val strideY: Int,
-        private val strideU: Int,
-        private val strideV: Int,
-    ) {
-        companion object {
-            fun copyOf(frame: VideoFrame): Picture {
-                val i420 = frame.buffer.toI420() ?: error("讀不到畫面的內容")
-                try {
-                    return Picture(
-                        i420.width, i420.height, frame.rotation,
-                        bytes(i420.dataY), bytes(i420.dataU), bytes(i420.dataV),
-                        i420.strideY, i420.strideU, i420.strideV,
-                    )
-                } finally {
-                    i420.release()
-                }
-            }
-
-            private fun bytes(buffer: java.nio.ByteBuffer): ByteArray {
-                val copy = buffer.duplicate()
-                return ByteArray(copy.remaining()).also { copy.get(it) }
-            }
+    /**
+     * 把一張畫面複製成一整塊：亮度、色差 U、色差 V 依序接在一起（I420），
+     * 每一列之間沒有多餘的空位，所以大小固定是寬×高×1.5。
+     * 複製出來之後就不依賴 WebRTC 的畫面了。
+     */
+    private fun pack(frame: VideoFrame): Map<String, Any> {
+        val i420 = frame.buffer.toI420() ?: error("讀不到畫面的內容")
+        try {
+            val width = i420.width
+            val height = i420.height
+            if (width % 2 != 0 || height % 2 != 0) error("畫面的寬高不是偶數：${width}x$height")
+            val bytes = ByteArray(width * height * 3 / 2)
+            var at = copyPlane(i420.dataY, i420.strideY, width, height, bytes, 0)
+            at = copyPlane(i420.dataU, i420.strideU, width / 2, height / 2, bytes, at)
+            copyPlane(i420.dataV, i420.strideV, width / 2, height / 2, bytes, at)
+            return mapOf(
+                "width" to width,
+                "height" to height,
+                "rotation" to frame.rotation,
+                "bytes" to bytes,
+            )
+        } finally {
+            i420.release()
         }
+    }
 
-        fun toPng(): ByteArray {
-            // 視訊畫面用的是「亮度＋色差」的格式（BT.601、有限範圍），PNG 要的是紅綠藍。
-            val pixels = IntArray(width * height)
-            var index = 0
-            for (row in 0 until height) {
-                val yRow = row * strideY
-                val uRow = (row / 2) * strideU
-                val vRow = (row / 2) * strideV
-                for (column in 0 until width) {
-                    val c = (y[yRow + column].toInt() and 0xff) - 16
-                    val d = (u[uRow + column / 2].toInt() and 0xff) - 128
-                    val e = (v[vRow + column / 2].toInt() and 0xff) - 128
-                    val r = ((298 * c + 409 * e + 128) shr 8).coerceIn(0, 255)
-                    val g = ((298 * c - 100 * d - 208 * e + 128) shr 8).coerceIn(0, 255)
-                    val b = ((298 * c + 516 * d + 128) shr 8).coerceIn(0, 255)
-                    pixels[index++] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
-                }
-            }
-            var bitmap = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
-            if (rotation != 0) {
-                val turned = Bitmap.createBitmap(
-                    bitmap, 0, 0, width, height,
-                    Matrix().apply { postRotate(rotation.toFloat()) }, true,
-                )
-                bitmap.recycle()
-                bitmap = turned
-            }
-            val out = ByteArrayOutputStream(width * height)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-            bitmap.recycle()
-            return out.toByteArray()
+    /** 一列一列複製，跳過每一列後面可能多出來的空位。回傳下一塊要從哪裡開始寫。 */
+    private fun copyPlane(
+        source: ByteBuffer,
+        stride: Int,
+        width: Int,
+        height: Int,
+        into: ByteArray,
+        start: Int,
+    ): Int {
+        val plane = source.duplicate()
+        var at = start
+        for (row in 0 until height) {
+            plane.position(row * stride)
+            plane.get(into, at, width)
+            at += width
         }
+        return at
     }
 }

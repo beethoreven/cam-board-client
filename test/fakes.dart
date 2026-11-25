@@ -119,8 +119,13 @@ class FakeCamera implements CameraSource {
   /// 下一次對焦要等這個完成才回報，用來模擬對焦要花時間。用過一次就清掉。
   Completer<void>? nextFocusGate;
 
-  /// 拍照時回傳的內容；設成 null 模擬拍照失敗。
-  Uint8List? png = Uint8List.fromList([1, 2, 3]);
+  /// 拍照時回傳的畫面（4×2，要轉 90 度才是正的）；設成 null 模擬拍照失敗。
+  RawFrame? frame = RawFrame(
+    width: 4,
+    height: 2,
+    rotation: 90,
+    i420: Uint8List.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+  );
   int captureCount = 0;
 
   List<double> get zooms => [for (final a in applied) a.zoom];
@@ -182,9 +187,9 @@ class FakeCamera implements CameraSource {
   }
 
   @override
-  Future<Uint8List> capturePng() async {
+  Future<RawFrame> captureFrame() async {
     captureCount++;
-    final data = png;
+    final data = frame;
     if (data == null) throw Exception('拍照失敗');
     return data;
   }

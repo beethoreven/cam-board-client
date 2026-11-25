@@ -230,12 +230,20 @@ class BoardController extends ChangeNotifier {
     _shooting = true;
     notifyListeners();
     try {
-      final png = await _camera.capturePng();
+      final frame = await _camera.captureFrame();
       final id = ++_lastShotId;
       // 擷取要一點時間，這段期間可能有人抄錄完了或離開了，所以傳之前再看一次。
       for (final viewerId in _recorders.recording) {
-        _server.send(viewerId, ShotMessage(id: id, bytes: png.length));
-        _server.sendBytes(viewerId, png);
+        _server.send(
+          viewerId,
+          ShotMessage(
+            id: id,
+            width: frame.width,
+            height: frame.height,
+            rotation: frame.rotation,
+          ),
+        );
+        _server.sendBytes(viewerId, frame.i420);
       }
     } catch (_) {
       _notices.add('拍照失敗');
@@ -271,7 +279,7 @@ class BoardController extends ChangeNotifier {
         _recorders.started(viewerId);
       case RecordStopMessage():
         _recorders.stopped(viewerId);
-      case ShotSavedMessage():
+      case ShotReceivedMessage():
         final name = _recorders.nameOf(viewerId);
         if (name != null) _notices.add(shotSavedNotice(name));
       case ByeMessage():

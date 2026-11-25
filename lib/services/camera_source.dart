@@ -42,8 +42,8 @@ abstract interface class CameraSource {
     required FocusCommand focus,
   });
 
-  /// 擷取鏡頭現在的畫面，回傳 PNG 的內容。這張畫面還沒經過視訊壓縮。
-  Future<Uint8List> capturePng();
+  /// 擷取鏡頭現在的畫面，原樣回傳：還沒經過視訊壓縮，也還沒轉正或壓成圖檔。
+  Future<RawFrame> captureFrame();
 
   /// 看板端自己看的預覽畫面。
   Widget buildPreview();
@@ -150,14 +150,20 @@ class WebRtcCameraSource implements CameraSource {
   }
 
   @override
-  Future<Uint8List> capturePng() async {
+  Future<RawFrame> captureFrame() async {
     final track = _track;
     if (track == null) throw StateError('鏡頭還沒開，不能拍照');
-    final png = await _channel.invokeMethod<Uint8List>('capturePng', {
-      'trackId': track.id,
-    });
-    if (png == null) throw StateError('鏡頭沒有回傳畫面');
-    return png;
+    final reply = await _channel.invokeMapMethod<String, Object?>(
+      'captureFrame',
+      {'trackId': track.id},
+    );
+    if (reply == null) throw StateError('鏡頭沒有回傳畫面');
+    return RawFrame(
+      width: reply['width']! as int,
+      height: reply['height']! as int,
+      rotation: reply['rotation']! as int,
+      i420: reply['bytes']! as Uint8List,
+    );
   }
 
   @override
