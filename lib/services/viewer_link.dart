@@ -37,6 +37,12 @@ class WebRtcViewerLink implements ViewerLink {
   static const _maxBitrate = 8000000;
   static const _maxFramerate = 30;
 
+  /// 畫質下限。WebRTC 估計的頻寬一旦掉到很低（預設最低 30 kbps），1080p 的畫面
+  /// 連一張都送不完，鄉民端只好一直要求重送整張畫面，把估計值壓得更低，
+  /// 就再也爬不回來：畫面停住，只能重新連線。2026-11-25 實機上鏡頭被遮住再放開
+  /// 之後發生過。區域網路撐得住這個數字，所以不讓它低於這裡。
+  static const _minBitrate = 1000000;
+
   final RTCPeerConnection _connection;
   final RTCRtpSender _sender;
   void Function(CandidateMessage)? _onCandidate;
@@ -137,6 +143,7 @@ class WebRtcViewerLink implements ViewerLink {
     parameters.degradationPreference =
         RTCDegradationPreference.MAINTAIN_RESOLUTION;
     for (final encoding in parameters.encodings ?? <RTCRtpEncoding>[]) {
+      encoding.minBitrate = _minBitrate;
       encoding.maxBitrate = _maxBitrate;
       encoding.maxFramerate = _maxFramerate;
     }
