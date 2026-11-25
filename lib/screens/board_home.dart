@@ -22,10 +22,13 @@ class _BoardHomeState extends State<BoardHome> {
   void initState() {
     super.initState();
     // 「誰抄錄了這個內容」這類提示，從畫面下方跳出來一下就消失。
+    // 新的提示直接蓋掉還在畫面上的那一則，不排隊：連續拍照時，
+    // 排隊會讓提示越來越落後實際拍的那一張。
     _notices = widget.controller.notices.listen((notice) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(notice)));
+        ..removeCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(notice)));
     });
   }
 

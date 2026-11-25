@@ -221,5 +221,32 @@ void main() {
       expect(find.textContaining('抄錄了這個內容'), findsOneWidget);
       await tester.pumpAndSettle(const Duration(seconds: 5));
     });
+
+    testWidgets('前一則提示還在畫面上時，新的提示直接蓋掉它，不用等它消失', (tester) async {
+      await pumpApp(tester);
+      await register(tester);
+      h.server.receive('mac-1', const JoinMessage(name: '阿明'));
+      h.server.receive('mac-2', const JoinMessage(name: '小華'));
+      await tester.pumpAndSettle();
+      h.server.receive('mac-1', const RecordStartMessage());
+      h.server.receive('mac-2', const RecordStartMessage());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('拍照'));
+      await tester.pumpAndSettle();
+
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.text('阿明抄錄了這個內容'), findsOneWidget);
+
+      // 第一則還要好幾秒才會自己消失，這時來了第二則。
+      h.server.receive('mac-2', const ShotReceivedMessage(id: 1));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.text('小華抄錄了這個內容'), findsOneWidget);
+      expect(find.text('阿明抄錄了這個內容'), findsNothing);
+      await tester.pumpAndSettle(const Duration(seconds: 5));
+    });
   });
 }
