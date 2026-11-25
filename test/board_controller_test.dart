@@ -334,6 +334,25 @@ void main() {
       expect(h.camera.focusPoints, [(0.25, 0.75), (1.0, 0.0)]);
     });
 
+    test('放大中點擊對焦不會動到鏡頭，縮放才不會掉回去', () async {
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(3);
+      await h.controller.focusAt(0.5, 0.5);
+
+      expect(h.camera.focusPoints, isEmpty);
+      expect(h.controller.zoom, 3);
+    });
+
+    test('縮回 1 倍後又可以點擊對焦', () async {
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(3);
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(0.001);
+      await h.controller.focusAt(0.5, 0.5);
+
+      expect(h.camera.focusPoints, [(0.5, 0.5)]);
+    });
+
     test('切換鏡頭後倍率回到 1 倍', () async {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(3);

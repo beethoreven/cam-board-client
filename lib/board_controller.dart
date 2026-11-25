@@ -148,9 +148,19 @@ class BoardController extends ChangeNotifier {
   }
 
   /// 點一下畫面對焦。[x]、[y] 是 0 到 1 的比例。
-  Future<void> focusAt(double x, double y) => _tryCameraControl(
-    () => _camera.focusAt(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)),
-  );
+  ///
+  /// 放大中不對焦。flutter_webrtc 1.6.3 在 Android 上設定對焦點和設定縮放時，
+  /// 都是整個換掉鏡頭的設定，而且各自只帶自己那一項：設定對焦點會讓縮放掉回
+  /// 1 倍，設定縮放會讓對焦點失效，兩者沒辦法同時存在（2026-11-25 實機確認，
+  /// 原始碼在套件的 CameraUtils.java）。放大是使用者明確要的，所以保住縮放。
+  /// 要讓放大中也能對焦，得自己寫 Android 端的鏡頭設定，把兩項放在同一次設定裡；
+  /// 做了那個之後拿掉這個限制。
+  Future<void> focusAt(double x, double y) async {
+    if (_zoom > minZoom) return;
+    await _tryCameraControl(
+      () => _camera.focusAt(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)),
+    );
+  }
 
   /// 執行一個鏡頭控制，回傳有沒有成功。
   ///
