@@ -47,3 +47,10 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // CameraControl.kt 要直接用到 WebRTC 的類別。flutter_webrtc 把它宣告成自己內部使用，
+    // 所以這裡要再宣告一次才編譯得過；執行時用的仍然是 flutter_webrtc 帶進來的那一份。
+    // 版本必須跟 flutter_webrtc 用的一致（1.6.3 用的是 150.7871.04），升級套件時要一起改。
+    compileOnly("io.github.webrtc-sdk:android:150.7871.04")
+}

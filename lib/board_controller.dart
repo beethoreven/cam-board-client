@@ -34,7 +34,15 @@ class BoardController extends ChangeNotifier {
   final ViewerLinkFactory _createLink;
   final ScreenAwake _screenAwake;
   final BoardSession _session = BoardSession();
+  final FocusControl _focus = FocusControl();
+  final BoardRecorders _recorders = BoardRecorders();
+  final _notices = StreamController<String>.broadcast();
   final Map<String, ViewerLink> _links = {};
+  Timer? _tapHoldTimer;
+
+  /// 第幾次要求對焦。對焦要一兩秒，連點時舊的那次比較晚回報，不能蓋掉新的。
+  int _focusRequest = 0;
+  int _lastShotId = 0;
   late final StreamSubscription<ViewerMessage> _messages;
   late final StreamSubscription<String> _disconnections;
 
@@ -67,6 +75,16 @@ class BoardController extends ChangeNotifier {
   double _zoom = minZoom;
   double _zoomAtPinchStart = minZoom;
 
+  /// 「自動對焦」開關。每次註冊後都是開的。
+  bool get autoFocus => _focus.autoFocus;
+
+  /// 正在拍照（擷取畫面並傳給鄉民端）。這段時間再按拍照不會有作用。
+  bool get shooting => _shooting;
+  bool _shooting = false;
+
+  /// 要跳出來給使用者看的提示，例如「阿明抄錄了這個內容」。
+  Stream<String> get notices => _notices.stream;
+
   /// 上次用的名字，用來預先填進輸入框。
   Future<String?> loadSavedName() => _nameStore.load();
 
@@ -75,6 +93,7 @@ class BoardController extends ChangeNotifier {
   Future<void> register(String name) async {
     if (_busy || state != BoardState.unregistered) return;
     _error = null;
+    _focus.reset();
     try {
       _session.register(name);
     } on BoardNameException catch (e) {
@@ -130,9 +149,11 @@ class BoardController extends ChangeNotifier {
 
   Future<void> switchCamera() async {
     if (!await _tryCameraControl(_camera.switchCamera)) return;
-    // 換了一顆鏡頭，倍率從頭開始。
+    // 換了一顆鏡頭，倍率從頭開始，鎖住的對焦距離也不能沿用。
     _zoom = minZoom;
+    _tapHoldTimer?.cancel();
     notifyListeners();
+    await _applyFocus(_focus.afterCameraSwitched());
   }
 
   /// 雙指縮放手勢開始。
@@ -144,22 +165,78 @@ class BoardController extends ChangeNotifier {
     if (next == _zoom) return;
     _zoom = next;
     notifyListeners();
-    await _tryCameraControl(() => _camera.setZoom(next));
+    // 只改倍率，對焦維持原樣。
+    await _tryCameraControl(
+      () => _camera.apply(zoom: next, focus: _focus.current),
+    );
   }
 
   /// 點一下畫面對焦。[x]、[y] 是 0 到 1 的比例。
   ///
-  /// 放大中不對焦。flutter_webrtc 1.6.3 在 Android 上設定對焦點和設定縮放時，
-  /// 都是整個換掉鏡頭的設定，而且各自只帶自己那一項：設定對焦點會讓縮放掉回
-  /// 1 倍，設定縮放會讓對焦點失效，兩者沒辦法同時存在（2026-11-25 實機確認，
-  /// 原始碼在套件的 CameraUtils.java）。放大是使用者明確要的，所以保住縮放。
-  /// 要讓放大中也能對焦，得自己寫 Android 端的鏡頭設定，把兩項放在同一次設定裡；
-  /// 做了那個之後拿掉這個限制。
+  /// 「自動對焦」開著時，對到的位置維持 [tapFocusHold]，之後恢復自動對焦；
+  /// 關著時就一直停在那裡。
   Future<void> focusAt(double x, double y) async {
-    if (_zoom > minZoom) return;
-    await _tryCameraControl(
-      () => _camera.focusAt(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)),
-    );
+    _tapHoldTimer?.cancel();
+    final command = _focus.tapped(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+    if (_focus.holdingTap) {
+      _tapHoldTimer = Timer(tapFocusHold, _onTapHoldExpired);
+    }
+    await _applyFocus(command);
+  }
+
+  void _onTapHoldExpired() {
+    final command = _focus.tapHoldExpired();
+    if (command != null) _applyFocus(command);
+  }
+
+  /// 切換「自動對焦」開關。關掉時對焦停在目前的位置。
+  Future<void> setAutoFocus(bool on) async {
+    _tapHoldTimer?.cancel();
+    final command = _focus.setAutoFocus(on);
+    notifyListeners();
+    await _applyFocus(command);
+  }
+
+  /// 讓鏡頭照 [command] 對焦（倍率不變），並記下它鎖住的距離。
+  Future<void> _applyFocus(FocusCommand command) async {
+    if (!_camera.isOpen) return;
+    final request = ++_focusRequest;
+    await _tryCameraControl(() async {
+      var outcome = await _camera.apply(zoom: _zoom, focus: command);
+      if (command is DistanceFocus && !outcome.distanceSupported) {
+        // 這支手機不能直接設定對焦距離：改成對畫面中央對焦一次再鎖住。
+        outcome = await _camera.apply(
+          zoom: _zoom,
+          focus: const PointFocus(0.5, 0.5),
+        );
+      }
+      // 這次對焦還沒做完，使用者又做了別的對焦操作：這次的結果已經過時了。
+      if (request != _focusRequest) return;
+      if (command is! ContinuousFocus) _focus.locked(outcome.lockedDistance);
+    });
+  }
+
+  /// 「拍照」：擷取現在的畫面，傳給所有抄錄中的鄉民端。
+  /// 沒有人在抄錄時不做任何事。
+  Future<void> takeShot() async {
+    if (_shooting || state != BoardState.showing) return;
+    if (_recorders.recording.isEmpty) return;
+    _shooting = true;
+    notifyListeners();
+    try {
+      final png = await _camera.capturePng();
+      final id = ++_lastShotId;
+      // 擷取要一點時間，這段期間可能有人抄錄完了或離開了，所以傳之前再看一次。
+      for (final viewerId in _recorders.recording) {
+        _server.send(viewerId, ShotMessage(id: id, bytes: png.length));
+        _server.sendBytes(viewerId, png);
+      }
+    } catch (_) {
+      _notices.add('拍照失敗');
+    } finally {
+      _shooting = false;
+      notifyListeners();
+    }
   }
 
   /// 執行一個鏡頭控制，回傳有沒有成功。
@@ -184,9 +261,19 @@ class BoardController extends ChangeNotifier {
         await _links[viewerId]?.acceptAnswer(sdp);
       case CandidateMessage():
         await _links[viewerId]?.addCandidate(message);
+      case RecordStartMessage():
+        _recorders.started(viewerId);
+      case RecordStopMessage():
+        _recorders.stopped(viewerId);
+      case ShotSavedMessage():
+        final name = _recorders.nameOf(viewerId);
+        if (name != null) _notices.add(shotSavedNotice(name));
       case ByeMessage():
         await _viewerGone(viewerId);
-      case HelloMessage() || OfferMessage() || CandidatesDoneMessage():
+      case HelloMessage() ||
+          OfferMessage() ||
+          CandidatesDoneMessage() ||
+          ShotMessage():
         // 這幾種只會由看板端送出，鄉民端送來就忽略。
         break;
     }
@@ -201,9 +288,13 @@ class BoardController extends ChangeNotifier {
       return;
     }
     try {
+      final wasOpen = _camera.isOpen;
       await _camera.open();
+      // 鏡頭剛開：把對焦套回這次註冊期間的狀態（開關、鎖住的距離）。
+      if (!wasOpen) await _applyFocus(_focus.afterCameraOpened());
       final link = await _createLink();
       _links[viewerId] = link;
+      _recorders.joined(viewerId, join.name);
       link.onCandidate = (candidate) => _server.send(viewerId, candidate);
       link.onCandidatesDone = () =>
           _server.send(viewerId, const CandidatesDoneMessage());
@@ -221,6 +312,7 @@ class BoardController extends ChangeNotifier {
   /// 一個鄉民端離開了。最後一個離開時關閉鏡頭、回到等候中。
   Future<void> _viewerGone(String viewerId) async {
     final link = _links.remove(viewerId);
+    _recorders.left(viewerId);
     _session.viewerLeft(viewerId);
     await link?.close();
     if (_links.isEmpty) await _closeCamera();
@@ -233,6 +325,7 @@ class BoardController extends ChangeNotifier {
     }
     final links = _links.values.toList();
     _links.clear();
+    _recorders.clear();
     for (final link in links) {
       await link.close();
     }
@@ -240,6 +333,7 @@ class BoardController extends ChangeNotifier {
   }
 
   Future<void> _closeCamera() async {
+    _tapHoldTimer?.cancel();
     await _camera.close();
     _zoom = minZoom;
   }
@@ -262,6 +356,8 @@ class BoardController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _tapHoldTimer?.cancel();
+    _notices.close();
     _messages.cancel();
     _disconnections.cancel();
     _advertiser.stop();

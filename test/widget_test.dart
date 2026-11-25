@@ -154,9 +154,72 @@ void main() {
       await tester.tap(find.byKey(const Key('preview')));
       await tester.pumpAndSettle();
 
-      final (x, y) = h.camera.focusPoints.single;
-      expect(x, closeTo(0.5, 0.01));
-      expect(y, closeTo(0.5, 0.01));
+      final focus = h.camera.focuses.last as PointFocus;
+      expect(focus.x, closeTo(0.5, 0.01));
+      expect(focus.y, closeTo(0.5, 0.01));
+      // 點擊對焦後有一個 5 秒的計時，讓它跑完。
+      await tester.pump(tapFocusHold);
+    });
+
+    testWidgets('預覽畫面比框窄時，點在畫面左緣算畫面的最左邊，點在旁邊的空白不算', (tester) async {
+      await pumpApp(tester);
+      await register(tester);
+      await viewerJoins(tester, 'mac-1');
+      // 畫面非常窄（寬是高的五分之一），所以一定只佔框的中間。
+      h.camera.previewAspectRatio = 0.2;
+      final box = tester.getRect(find.byKey(const Key('preview')));
+      final videoWidth = box.height * 0.2;
+      final videoLeft = box.center.dx - videoWidth / 2;
+      final before = h.camera.focuses.length;
+
+      await tester.tapAt(Offset(box.left + 2, box.center.dy));
+      await tester.pump();
+      expect(h.camera.focuses, hasLength(before));
+
+      await tester.tapAt(Offset(videoLeft + 1, box.center.dy));
+      await tester.pump();
+      final focus = h.camera.focuses.last as PointFocus;
+      expect(focus.x, closeTo(0, 0.02));
+      expect(focus.y, closeTo(0.5, 0.01));
+      await tester.pump(tapFocusHold);
+    });
+
+    testWidgets('「自動對焦」開關一開始是開的，關掉後鏡頭停在目前的位置', (tester) async {
+      await pumpApp(tester);
+      await register(tester);
+      await viewerJoins(tester, 'mac-1');
+      expect(
+        tester.widget<Switch>(find.byKey(const Key('autoFocus'))).value,
+        isTrue,
+      );
+
+      await tester.tap(find.byKey(const Key('autoFocus')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<Switch>(find.byKey(const Key('autoFocus'))).value,
+        isFalse,
+      );
+      expect(h.camera.focuses.last, isA<HoldFocus>());
+    });
+
+    testWidgets('按「拍照」把照片傳給抄錄中的鄉民端，存好後跳出提示', (tester) async {
+      await pumpApp(tester);
+      await register(tester);
+      await viewerJoins(tester, 'mac-1');
+      h.server.receive('mac-1', const RecordStartMessage());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('拍照'));
+      await tester.pumpAndSettle();
+      expect(h.server.sentBytes['mac-1'], hasLength(1));
+
+      h.server.receive('mac-1', const ShotSavedMessage(id: 1));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('抄錄了這個內容'), findsOneWidget);
+      await tester.pumpAndSettle(const Duration(seconds: 5));
     });
   });
 }

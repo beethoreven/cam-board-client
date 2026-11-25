@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:cam_board_client/board_controller.dart';
 import 'package:cam_board_client/services/board_advertiser.dart';
@@ -67,6 +68,13 @@ class FakeServer implements SignalServer {
   void send(String viewerId, SignalMessage message) =>
       sent.putIfAbsent(viewerId, () => []).add(message);
 
+  /// 送給每個鄉民端的二進位資料（照片），照順序記下來。
+  final Map<String, List<Uint8List>> sentBytes = {};
+
+  @override
+  void sendBytes(String viewerId, Uint8List bytes) =>
+      sentBytes.putIfAbsent(viewerId, () => []).add(bytes);
+
   @override
   Future<void> dismiss(String viewerId, ByeReason reason) async =>
       dismissed[viewerId] = reason;
@@ -94,8 +102,29 @@ class FakeCamera implements CameraSource {
   /// 模擬這支手機的鏡頭不支援縮放、對焦、切換。
   bool controlsUnsupported = false;
   int switchCount = 0;
-  final List<double> zooms = [];
-  final List<(double, double)> focusPoints = [];
+
+  /// 模擬這支手機不能直接設定對焦距離。
+  bool distanceUnsupported = false;
+
+  /// 鏡頭對焦鎖住時回報的距離。
+  double? reportedDistance = 2.5;
+
+  /// 套用過的每一組設定，照順序。
+  final List<({double zoom, FocusCommand focus})> applied = [];
+
+  /// 預覽畫面的寬高比；null 模擬還沒有畫面。
+  @override
+  double? previewAspectRatio;
+
+  /// 下一次對焦要等這個完成才回報，用來模擬對焦要花時間。用過一次就清掉。
+  Completer<void>? nextFocusGate;
+
+  /// 拍照時回傳的內容；設成 null 模擬拍照失敗。
+  Uint8List? png = Uint8List.fromList([1, 2, 3]);
+  int captureCount = 0;
+
+  List<double> get zooms => [for (final a in applied) a.zoom];
+  List<FocusCommand> get focuses => [for (final a in applied) a.focus];
 
   @override
   bool isOpen = false;
@@ -121,15 +150,32 @@ class FakeCamera implements CameraSource {
   }
 
   @override
-  Future<void> setZoom(double zoom) async {
+  Future<CameraOutcome> apply({
+    required double zoom,
+    required FocusCommand focus,
+  }) async {
     _failIfUnsupported();
-    zooms.add(zoom);
+    applied.add((zoom: zoom, focus: focus));
+    final locked = reportedDistance;
+    final gate = nextFocusGate;
+    nextFocusGate = null;
+    if (gate != null) await gate.future;
+    return switch (focus) {
+      ContinuousFocus() => const CameraOutcome(),
+      DistanceFocus() when distanceUnsupported => const CameraOutcome(
+        distanceSupported: false,
+      ),
+      DistanceFocus(:final distance) => CameraOutcome(lockedDistance: distance),
+      HoldFocus() || PointFocus() => CameraOutcome(lockedDistance: locked),
+    };
   }
 
   @override
-  Future<void> focusAt(double x, double y) async {
-    _failIfUnsupported();
-    focusPoints.add((x, y));
+  Future<Uint8List> capturePng() async {
+    captureCount++;
+    final data = png;
+    if (data == null) throw Exception('拍照失敗');
+    return data;
   }
 
   void _failIfUnsupported() {
@@ -222,8 +268,19 @@ class Harness {
   );
 
   /// 模擬一個鄉民端加入，並等看板端處理完。
-  Future<void> join(String viewerId, {int protocol = protocolVersion}) async {
-    server.receive(viewerId, JoinMessage(protocol: protocol));
+  Future<void> join(
+    String viewerId, {
+    int protocol = protocolVersion,
+    String name = '',
+  }) async {
+    server.receive(viewerId, JoinMessage(protocol: protocol, name: name));
+    await pumpEventQueue();
+  }
+
+  /// 模擬一個鄉民端加入並開始抄錄。
+  Future<void> joinRecording(String viewerId, {String name = ''}) async {
+    await join(viewerId, name: name);
+    server.receive(viewerId, const RecordStartMessage());
     await pumpEventQueue();
   }
 }

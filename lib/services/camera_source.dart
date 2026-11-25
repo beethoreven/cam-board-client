@@ -1,7 +1,19 @@
-import 'dart:math';
-
+import 'package:cam_board_core/cam_board_core.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+/// 鏡頭套用一組設定之後回報的結果。
+class CameraOutcome {
+  const CameraOutcome({this.lockedDistance, this.distanceSupported = true});
+
+  /// 對焦鎖住的距離。鏡頭沒回報，或現在是自動對焦時是 null。
+  final double? lockedDistance;
+
+  /// 要求「直接設成某個對焦距離」時，這支手機支不支援。
+  /// 不支援時鏡頭會停在目前的位置。
+  final bool distanceSupported;
+}
 
 /// 看板端的鏡頭。
 ///
@@ -21,13 +33,24 @@ abstract interface class CameraSource {
 
   Future<void> switchCamera();
 
-  Future<void> setZoom(double zoom);
+  /// 套用整組鏡頭設定：縮放倍率和對焦方式。
+  ///
+  /// 兩項一定要一起給。鏡頭的設定是整組換掉的，分開設定會互相蓋掉
+  /// （之前「點擊對焦後縮放掉回 1 倍」就是這個原因）。
+  Future<CameraOutcome> apply({
+    required double zoom,
+    required FocusCommand focus,
+  });
 
-  /// 對畫面上的一點對焦。[x]、[y] 是 0 到 1 的比例，(0, 0) 是左上角。
-  Future<void> focusAt(double x, double y);
+  /// 擷取鏡頭現在的畫面，回傳 PNG 的內容。這張畫面還沒經過視訊壓縮。
+  Future<Uint8List> capturePng();
 
   /// 看板端自己看的預覽畫面。
   Widget buildPreview();
+
+  /// 預覽畫面的寬除以高（已經把手機的方向算進去）。還沒有畫面時是 null。
+  /// 用來把點在預覽框上的位置換算成畫面上的位置。
+  double? get previewAspectRatio;
 }
 
 /// 用 WebRTC 的鏡頭擷取實作。同一個鏡頭畫面會分給所有正在看的鄉民端。
@@ -94,21 +117,55 @@ class WebRtcCameraSource implements CameraSource {
     if (track != null) await Helper.switchCamera(track);
   }
 
+  /// 縮放、對焦、擷取走我們自己寫的 Android 鏡頭控制
+  /// （android/.../CameraControl.kt），不用 flutter_webrtc 的 Helper。原因見那個檔案開頭。
+  static const _channel = MethodChannel(
+    'tw.com.tutorarthur.camboard.client/camera',
+  );
+
   @override
-  Future<void> setZoom(double zoom) async {
+  Future<CameraOutcome> apply({
+    required double zoom,
+    required FocusCommand focus,
+  }) async {
     final track = _track;
-    if (track != null) await Helper.setZoom(track, zoom);
+    if (track == null) return const CameraOutcome();
+    final reply = await _channel.invokeMapMethod<String, Object?>('apply', {
+      'trackId': track.id,
+      'zoom': zoom,
+      ...switch (focus) {
+        ContinuousFocus() => {'focus': 'continuous'},
+        HoldFocus() => {'focus': 'hold'},
+        PointFocus(:final x, :final y) => {'focus': 'point', 'x': x, 'y': y},
+        DistanceFocus(:final distance) => {
+          'focus': 'distance',
+          'distance': distance,
+        },
+      },
+    });
+    return CameraOutcome(
+      lockedDistance: (reply?['distance'] as num?)?.toDouble(),
+      distanceSupported: reply?['supported'] as bool? ?? true,
+    );
   }
 
   @override
-  Future<void> focusAt(double x, double y) async {
+  Future<Uint8List> capturePng() async {
     final track = _track;
-    if (track == null) return;
-    // 這裡刻意不先呼叫 Helper.setFocusMode。flutter_webrtc 1.6.3 的 Android 端
-    // 讀的參數名稱是 "mode"，Dart 端送的卻是 "focusMode"，所以它在 Android 上
-    // 一定會失敗（2026-11-25 實機確認）。只指定對焦點就夠用。
-    // 套件修好這個問題之後，如果需要「對焦後鎖定」再把 setFocusMode 加回來。
-    await Helper.setFocusPoint(track, Point(x, y));
+    if (track == null) throw StateError('鏡頭還沒開，不能拍照');
+    final png = await _channel.invokeMethod<Uint8List>('capturePng', {
+      'trackId': track.id,
+    });
+    if (png == null) throw StateError('鏡頭沒有回傳畫面');
+    return png;
+  }
+
+  @override
+  double? get previewAspectRatio {
+    final value = _renderer.value;
+    if (value.width <= 0 || value.height <= 0) return null;
+    final sideways = value.rotation == 90 || value.rotation == 270;
+    return sideways ? value.height / value.width : value.width / value.height;
   }
 
   @override

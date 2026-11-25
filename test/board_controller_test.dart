@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cam_board_core/cam_board_core.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart' hide pumpEventQueue;
 
 import 'fakes.dart';
@@ -292,6 +295,8 @@ void main() {
     setUp(() async {
       await h.controller.register('教室白板');
       await h.join('mac-1');
+      // 鏡頭剛開時會套用一次設定，清掉它，下面每個測試只看自己造成的。
+      h.camera.applied.clear();
     });
 
     test('雙指縮放會設定鏡頭倍率', () async {
@@ -327,30 +332,46 @@ void main() {
       expect(h.camera.zooms, isEmpty);
     });
 
+    test('只改倍率時對焦維持自動，不會觸發新的對焦', () async {
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(2);
+
+      expect(h.camera.applied.single.zoom, 2);
+      expect(h.camera.applied.single.focus, isA<ContinuousFocus>());
+    });
+
     test('點擊對焦會把位置交給鏡頭，超出畫面的位置拉回邊緣', () async {
       await h.controller.focusAt(0.25, 0.75);
       await h.controller.focusAt(1.4, -0.2);
 
-      expect(h.camera.focusPoints, [(0.25, 0.75), (1.0, 0.0)]);
+      expect(h.camera.focuses, [
+        const PointFocus(0.25, 0.75),
+        const PointFocus(1.0, 0.0),
+      ]);
     });
 
-    test('放大中點擊對焦不會動到鏡頭，縮放才不會掉回去', () async {
+    test('放大中點擊對焦，倍率跟著對焦一起送給鏡頭，縮放不會掉回去', () async {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(3);
       await h.controller.focusAt(0.5, 0.5);
 
-      expect(h.camera.focusPoints, isEmpty);
+      expect(h.camera.applied.last, (
+        zoom: 3.0,
+        focus: const PointFocus(0.5, 0.5),
+      ));
       expect(h.controller.zoom, 3);
     });
 
-    test('縮回 1 倍後又可以點擊對焦', () async {
-      h.controller.pinchStarted();
-      await h.controller.pinchUpdated(3);
-      h.controller.pinchStarted();
-      await h.controller.pinchUpdated(0.001);
+    test('點擊對焦後再改倍率，對焦留在剛才鎖住的距離', () async {
+      h.camera.reportedDistance = 4.2;
       await h.controller.focusAt(0.5, 0.5);
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(2);
 
-      expect(h.camera.focusPoints, [(0.5, 0.5)]);
+      expect(h.camera.applied.last, (
+        zoom: 2.0,
+        focus: const DistanceFocus(4.2),
+      ));
     });
 
     test('切換鏡頭後倍率回到 1 倍', () async {
@@ -375,12 +396,271 @@ void main() {
       expect(h.camera.isOpen, isTrue);
     });
 
+    test('切換鏡頭後，自動對焦開著就繼續自動對焦', () async {
+      await h.controller.switchCamera();
+
+      expect(h.camera.applied.last, (
+        zoom: minZoom,
+        focus: const ContinuousFocus(),
+      ));
+    });
+
     test('所有人離開後倍率回到 1 倍', () async {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(3);
       await h.controller.stopShowing();
 
       expect(h.controller.zoom, minZoom);
+    });
+  });
+
+  group('自動對焦開關', () {
+    setUp(() async {
+      await h.controller.register('教室白板');
+      await h.join('mac-1');
+      h.camera.applied.clear();
+    });
+
+    test('註冊後開關是開的，鏡頭一開就是自動對焦', () async {
+      final fresh = Harness();
+      await fresh.controller.register('教室白板');
+      await fresh.join('mac-1');
+
+      expect(fresh.controller.autoFocus, isTrue);
+      expect(fresh.camera.applied.single, (
+        zoom: minZoom,
+        focus: const ContinuousFocus(),
+      ));
+    });
+
+    test('開著時點擊對焦：5 秒內不自動對焦，時間到才恢復', () {
+      fakeAsync((async) {
+        h.controller.focusAt(0.3, 0.3);
+        async.flushMicrotasks();
+        expect(h.camera.focuses, [const PointFocus(0.3, 0.3)]);
+
+        async.elapse(tapFocusHold - const Duration(milliseconds: 1));
+        expect(h.camera.focuses, hasLength(1));
+
+        async.elapse(const Duration(milliseconds: 1));
+        expect(h.camera.focuses.last, isA<ContinuousFocus>());
+      });
+    });
+
+    test('5 秒內再點一次，重新計時', () {
+      fakeAsync((async) {
+        h.controller.focusAt(0.3, 0.3);
+        async.elapse(const Duration(seconds: 4));
+        h.controller.focusAt(0.6, 0.6);
+        async.elapse(const Duration(seconds: 4));
+
+        expect(h.camera.focuses, [
+          const PointFocus(0.3, 0.3),
+          const PointFocus(0.6, 0.6),
+        ]);
+
+        async.elapse(const Duration(seconds: 1));
+        expect(h.camera.focuses.last, isA<ContinuousFocus>());
+      });
+    });
+
+    test('連點兩次時，比較晚回報的第一次不會蓋掉第二次鎖住的距離', () async {
+      await h.controller.setAutoFocus(false);
+      final slow = Completer<void>();
+      h.camera
+        ..reportedDistance = 1.0
+        ..nextFocusGate = slow;
+      final first = h.controller.focusAt(0.2, 0.2);
+      h.camera.reportedDistance = 7.0;
+      await h.controller.focusAt(0.8, 0.8);
+      slow.complete();
+      await first;
+
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(2);
+
+      expect(h.camera.focuses.last, const DistanceFocus(7.0));
+    });
+
+    test('關掉開關：停在目前的位置', () async {
+      await h.controller.setAutoFocus(false);
+
+      expect(h.controller.autoFocus, isFalse);
+      expect(h.camera.focuses.single, isA<HoldFocus>());
+    });
+
+    test('關著時點擊對焦：過多久都不會恢復自動對焦', () {
+      fakeAsync((async) {
+        h.controller.setAutoFocus(false);
+        h.controller.focusAt(0.3, 0.3);
+        async.elapse(tapFocusHold * 3);
+
+        expect(h.camera.focuses, [
+          isA<HoldFocus>(),
+          const PointFocus(0.3, 0.3),
+        ]);
+      });
+    });
+
+    test('點擊對焦的 5 秒內關掉開關，時間到也不會恢復自動對焦', () {
+      fakeAsync((async) {
+        h.controller.focusAt(0.3, 0.3);
+        async.elapse(const Duration(seconds: 1));
+        h.controller.setAutoFocus(false);
+        async.elapse(tapFocusHold * 2);
+
+        expect(h.camera.focuses.last, isA<HoldFocus>());
+      });
+    });
+
+    test('再打開開關：恢復自動對焦', () async {
+      await h.controller.setAutoFocus(false);
+      await h.controller.setAutoFocus(true);
+
+      expect(h.camera.focuses.last, isA<ContinuousFocus>());
+    });
+
+    test('鄉民端離開再回來，鏡頭重開時套回鎖住的對焦距離', () async {
+      h.camera.reportedDistance = 4.2;
+      await h.controller.setAutoFocus(false);
+      await h.controller.focusAt(0.5, 0.5);
+      h.server.drop('mac-1');
+      await pumpEventQueue();
+      expect(h.camera.isOpen, isFalse);
+      h.camera.applied.clear();
+
+      await h.join('mac-2');
+
+      expect(h.controller.autoFocus, isFalse);
+      expect(h.camera.applied.single, (
+        zoom: minZoom,
+        focus: const DistanceFocus(4.2),
+      ));
+    });
+
+    test('手機不能直接設定對焦距離時，鏡頭重開後改對畫面中央對焦一次', () async {
+      h.camera.reportedDistance = 4.2;
+      h.camera.distanceUnsupported = true;
+      await h.controller.setAutoFocus(false);
+      h.server.drop('mac-1');
+      await pumpEventQueue();
+      h.camera.applied.clear();
+
+      await h.join('mac-2');
+
+      expect(h.camera.focuses, [
+        const DistanceFocus(4.2),
+        const PointFocus(0.5, 0.5),
+      ]);
+    });
+
+    test('切換鏡頭後，開關關著就對畫面中央重新對焦，不沿用另一顆的距離', () async {
+      await h.controller.setAutoFocus(false);
+      await h.controller.switchCamera();
+
+      expect(h.camera.focuses.last, const PointFocus(0.5, 0.5));
+    });
+
+    test('撤銷註冊後重新註冊，開關回到開著', () async {
+      await h.controller.setAutoFocus(false);
+      await h.controller.unregister();
+      await h.controller.register('教室白板');
+
+      expect(h.controller.autoFocus, isTrue);
+    });
+  });
+
+  group('拍照', () {
+    late List<String> notices;
+
+    setUp(() async {
+      await h.controller.register('教室白板');
+      notices = [];
+      h.controller.notices.listen(notices.add);
+    });
+
+    test('沒有人在抄錄時不做任何事', () async {
+      await h.join('mac-1', name: '阿明');
+      await h.controller.takeShot();
+
+      expect(h.camera.captureCount, 0);
+      expect(h.server.sentBytes, isEmpty);
+    });
+
+    test('只把照片傳給抄錄中的鄉民端，先送說明再送照片', () async {
+      await h.join('mac-1', name: '阿明');
+      await h.joinRecording('mac-2', name: '小華');
+      await h.controller.takeShot();
+
+      expect(h.camera.captureCount, 1);
+      final shot = h.server.sent['mac-2']!.last as ShotMessage;
+      expect(shot.bytes, 3);
+      expect(h.server.sentBytes['mac-2']!.single, [1, 2, 3]);
+      expect(h.server.sentBytes['mac-1'], isNull);
+      expect(h.server.sent['mac-1'], isNot(contains(isA<ShotMessage>())));
+    });
+
+    test('多個鄉民端在抄錄時拍一次，每個都收到同一張', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      await h.joinRecording('mac-2', name: '小華');
+      await h.controller.takeShot();
+
+      expect(h.camera.captureCount, 1);
+      final first = h.server.sent['mac-1']!.last as ShotMessage;
+      final second = h.server.sent['mac-2']!.last as ShotMessage;
+      expect(first.id, second.id);
+    });
+
+    test('每張照片的編號不同', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      await h.controller.takeShot();
+      await h.controller.takeShot();
+
+      final ids = h.server.sent['mac-1']!.whereType<ShotMessage>().map(
+        (shot) => shot.id,
+      );
+      expect(ids.toSet(), hasLength(2));
+    });
+
+    test('鄉民端抄錄完了之後就不再傳給它', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      h.server.receive('mac-1', const RecordStopMessage());
+      await pumpEventQueue();
+      await h.controller.takeShot();
+
+      expect(h.camera.captureCount, 0);
+    });
+
+    test('鄉民端說存好了，才跳出誰抄錄了的提示', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      await h.controller.takeShot();
+      await pumpEventQueue();
+      expect(notices, isEmpty);
+
+      h.server.receive('mac-1', const ShotSavedMessage(id: 1));
+      await pumpEventQueue();
+
+      expect(notices, ['阿明抄錄了這個內容']);
+    });
+
+    test('拍照失敗時提示，而且之後還能再拍', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      h.camera.png = null;
+      await h.controller.takeShot();
+      await pumpEventQueue();
+
+      expect(notices, ['拍照失敗']);
+      expect(h.controller.shooting, isFalse);
+      expect(h.server.sentBytes, isEmpty);
+    });
+
+    test('不給看了之後，沒有人算在抄錄', () async {
+      await h.joinRecording('mac-1', name: '阿明');
+      await h.controller.stopShowing();
+      await h.join('mac-1', name: '阿明');
+      await h.controller.takeShot();
+
+      expect(h.camera.captureCount, 0);
     });
   });
 }

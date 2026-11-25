@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cam_board_core/cam_board_core.dart';
 
@@ -19,6 +20,9 @@ abstract interface class SignalServer {
 
   /// 送一則訊息給某個鄉民端。它已經斷線時不做任何事。
   void send(String viewerId, SignalMessage message);
+
+  /// 送一筆二進位資料給鄉民端（照片）。要緊接在說明它的那則訊息之後送。
+  void sendBytes(String viewerId, Uint8List bytes);
 
   /// 告訴某個鄉民端結束了，並關掉它的連線。
   Future<void> dismiss(String viewerId, ByeReason reason);
@@ -101,6 +105,10 @@ class WebSocketSignalServer implements SignalServer {
   @override
   void send(String viewerId, SignalMessage message) =>
       _sockets[viewerId]?.add(message.encode());
+
+  @override
+  void sendBytes(String viewerId, Uint8List bytes) =>
+      _sockets[viewerId]?.add(bytes);
 
   @override
   Future<void> dismiss(String viewerId, ByeReason reason) async {

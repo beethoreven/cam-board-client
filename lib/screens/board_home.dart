@@ -1,16 +1,43 @@
+import 'dart:async';
+
 import 'package:cam_board_core/cam_board_core.dart';
 import 'package:flutter/material.dart';
 
 import '../board_controller.dart';
 
 /// 看板端的畫面：沒註冊時輸入名字，註冊後顯示等候中。
-class BoardHome extends StatelessWidget {
+class BoardHome extends StatefulWidget {
   const BoardHome({super.key, required this.controller});
 
   final BoardController controller;
 
   @override
+  State<BoardHome> createState() => _BoardHomeState();
+}
+
+class _BoardHomeState extends State<BoardHome> {
+  late final StreamSubscription<String> _notices;
+
+  @override
+  void initState() {
+    super.initState();
+    // 「誰抄錄了這個內容」這類提示，從畫面下方跳出來一下就消失。
+    _notices = widget.controller.notices.listen((notice) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(notice)));
+    });
+  }
+
+  @override
+  void dispose() {
+    _notices.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return Scaffold(
       appBar: AppBar(title: const Text('看板端')),
       body: SafeArea(
@@ -157,13 +184,45 @@ class _Showing extends StatelessWidget {
                   controller.pinchUpdated(details.scale);
                 }
               },
-              onTapUp: (details) => controller.focusAt(
-                details.localPosition.dx / constraints.maxWidth,
-                details.localPosition.dy / constraints.maxHeight,
-              ),
+              onTapUp: (details) {
+                // 預覽畫面的比例和這個框不一定一樣，畫面可能只佔框的中間。
+                final box = Dimensions(
+                  constraints.maxWidth,
+                  constraints.maxHeight,
+                );
+                final point = pointInFittedContent(
+                  box: box,
+                  contentAspect:
+                      controller.camera.previewAspectRatio ??
+                      box.width / box.height,
+                  dx: details.localPosition.dx,
+                  dy: details.localPosition.dy,
+                );
+                // 點在畫面旁邊的空白處不算。
+                if (point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+                  return;
+                }
+                controller.focusAt(point.x, point.y);
+              },
               child: controller.camera.buildPreview(),
             ),
           ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            const Text('自動對焦'),
+            Switch(
+              key: const Key('autoFocus'),
+              value: controller.autoFocus,
+              onChanged: controller.setAutoFocus,
+            ),
+            const Spacer(),
+            FilledButton.tonal(
+              onPressed: controller.shooting ? null : controller.takeShot,
+              child: const Text('拍照'),
+            ),
+          ],
         ),
         const SizedBox(height: 12),
         Row(
