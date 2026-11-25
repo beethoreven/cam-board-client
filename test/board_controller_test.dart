@@ -158,6 +158,19 @@ void main() {
       expect(h.server.sent['mac-1']!.last, candidate);
     });
 
+    test('網路路徑全部找完時，告訴對應的鄉民端送完了', () async {
+      await h.join('mac-1');
+      await h.join('mac-2');
+
+      h.links[1].emitCandidatesDone();
+
+      expect(h.server.sent['mac-2']!.last, isA<CandidatesDoneMessage>());
+      expect(
+        h.server.sent['mac-1'],
+        isNot(contains(isA<CandidatesDoneMessage>())),
+      );
+    });
+
     test('多個鄉民端可以同時看，共用同一個鏡頭', () async {
       await h.join('mac-1');
       await h.join('mac-2');

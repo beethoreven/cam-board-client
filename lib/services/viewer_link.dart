@@ -8,6 +8,9 @@ abstract interface class ViewerLink {
   /// 這條連線找到一條可以連到自己的網路路徑時呼叫，要轉送給鄉民端。
   set onCandidate(void Function(CandidateMessage candidate) handler);
 
+  /// 這條連線的網路路徑全部找完、不會再有新的時呼叫，要告訴鄉民端。
+  set onCandidatesDone(void Function() handler);
+
   /// 連線中斷時呼叫（鄉民端關掉、網路斷了）。
   set onLost(void Function() handler);
 
@@ -37,6 +40,7 @@ class WebRtcViewerLink implements ViewerLink {
   final RTCPeerConnection _connection;
   final RTCRtpSender _sender;
   void Function(CandidateMessage)? _onCandidate;
+  void Function()? _onCandidatesDone;
   void Function()? _onLost;
   bool _closed = false;
 
@@ -76,6 +80,11 @@ class WebRtcViewerLink implements ViewerLink {
         ),
       );
     };
+    connection.onIceGatheringState = (state) {
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        link._onCandidatesDone?.call();
+      }
+    };
     connection.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
@@ -93,6 +102,9 @@ class WebRtcViewerLink implements ViewerLink {
   @override
   set onCandidate(void Function(CandidateMessage) handler) =>
       _onCandidate = handler;
+
+  @override
+  set onCandidatesDone(void Function() handler) => _onCandidatesDone = handler;
 
   @override
   set onLost(void Function() handler) => _onLost = handler;

@@ -143,6 +143,7 @@ class FakeCamera implements CameraSource {
 
 class FakeLink implements ViewerLink {
   void Function(CandidateMessage)? _onCandidate;
+  void Function()? _onCandidatesDone;
   void Function()? _onLost;
   String? answer;
   final List<CandidateMessage> candidates = [];
@@ -158,6 +159,12 @@ class FakeLink implements ViewerLink {
   /// 模擬這條連線找到一條網路路徑。
   void emitCandidate(CandidateMessage candidate) =>
       _onCandidate?.call(candidate);
+
+  @override
+  set onCandidatesDone(void Function() handler) => _onCandidatesDone = handler;
+
+  /// 模擬這條連線的網路路徑全部找完了。
+  void emitCandidatesDone() => _onCandidatesDone?.call();
 
   /// 模擬這條連線中斷。
   void lose() => _onLost?.call();

@@ -176,8 +176,8 @@ class BoardController extends ChangeNotifier {
         await _links[viewerId]?.addCandidate(message);
       case ByeMessage():
         await _viewerGone(viewerId);
-      case HelloMessage() || OfferMessage():
-        // 這兩種只會由看板端送出，鄉民端送來就忽略。
+      case HelloMessage() || OfferMessage() || CandidatesDoneMessage():
+        // 這幾種只會由看板端送出，鄉民端送來就忽略。
         break;
     }
   }
@@ -195,6 +195,8 @@ class BoardController extends ChangeNotifier {
       final link = await _createLink();
       _links[viewerId] = link;
       link.onCandidate = (candidate) => _server.send(viewerId, candidate);
+      link.onCandidatesDone = () =>
+          _server.send(viewerId, const CandidatesDoneMessage());
       link.onLost = () => _viewerGone(viewerId);
       _session.viewerJoined(viewerId);
       notifyListeners();
