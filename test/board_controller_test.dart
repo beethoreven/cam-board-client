@@ -697,4 +697,175 @@ void main() {
       expect(h.camera.captureCount, 0);
     });
   });
+
+  group('加入到一半發生別的事', () {
+    test('鏡頭還在開的時候鄉民端就斷線：不會留下一個沒人的觀看', () async {
+      await h.controller.register('教室白板');
+      h.camera.openGate = Completer<void>();
+      h.server.receive('mac-1', const JoinMessage());
+      await pumpEventQueue();
+      h.server.drop('mac-1');
+      await pumpEventQueue();
+      h.camera.openGate!.complete();
+      await pumpEventQueue();
+
+      expect(h.controller.viewerCount, 0);
+      expect(h.controller.state, BoardState.waiting);
+      expect(h.camera.isOpen, isFalse);
+      expect(h.links.single.closed, isTrue);
+    });
+
+    test('鏡頭還在開的時候第二個人加入：鏡頭只開一次，兩個人都看得到', () async {
+      await h.controller.register('教室白板');
+      h.camera.openGate = Completer<void>();
+      h.server.receive('mac-1', const JoinMessage());
+      h.server.receive('mac-2', const JoinMessage());
+      await pumpEventQueue();
+      h.camera.openGate!.complete();
+      await pumpEventQueue();
+
+      expect(h.camera.openCount, 1);
+      expect(h.controller.viewerCount, 2);
+      expect(h.links, hasLength(2));
+    });
+
+    test('同一個鄉民端連送兩次「我要看」：只建一條連線', () async {
+      await h.controller.register('教室白板');
+      h.camera.openGate = Completer<void>();
+      h.server.receive('mac-1', const JoinMessage());
+      h.server.receive('mac-1', const JoinMessage());
+      await pumpEventQueue();
+      h.camera.openGate!.complete();
+      await pumpEventQueue();
+
+      expect(h.links, hasLength(1));
+      expect(h.controller.viewerCount, 1);
+    });
+
+    test('鏡頭還在開的時候按「撤銷註冊」：加入的人被結束，鏡頭不會留著', () async {
+      await h.controller.register('教室白板');
+      h.camera.openGate = Completer<void>();
+      h.server.receive('mac-1', const JoinMessage());
+      await pumpEventQueue();
+      final unregistering = h.controller.unregister();
+      h.camera.openGate!.complete();
+      await unregistering;
+
+      expect(h.controller.state, BoardState.unregistered);
+      expect(h.camera.isOpen, isFalse);
+      expect(h.server.dismissed['mac-1'], ByeReason.boardUnregistered);
+    });
+
+    test('鏡頭剛開要對焦，但不等對焦做完就先送出連線資訊', () async {
+      await h.controller.register('教室白板');
+      h.camera.nextFocusGate = Completer<void>();
+      await h.join('mac-1');
+
+      expect(h.server.sent['mac-1']!.whereType<OfferMessage>(), hasLength(1));
+    });
+  });
+
+  group('鄉民端沒有照規矩來', () {
+    test('加入之後一直不回覆連線資訊：時間到就結束它，鏡頭關掉', () {
+      fakeAsync((async) {
+        h.controller.register('教室白板');
+        async.flushMicrotasks();
+        h.server.receive('mac-1', const JoinMessage());
+        async.flushMicrotasks();
+        expect(h.camera.isOpen, isTrue);
+
+        async.elapse(const Duration(seconds: 11));
+
+        expect(h.server.dismissed['mac-1'], ByeReason.boardStopped);
+        expect(h.controller.viewerCount, 0);
+        expect(h.camera.isOpen, isFalse);
+      });
+    });
+
+    test('有回覆的不受影響', () {
+      fakeAsync((async) {
+        h.controller.register('教室白板');
+        async.flushMicrotasks();
+        h.server.receive('mac-1', const JoinMessage());
+        async.flushMicrotasks();
+        h.server.receive('mac-1', const AnswerMessage(sdp: 'answer-sdp'));
+        async.elapse(const Duration(seconds: 30));
+
+        expect(h.server.dismissed, isEmpty);
+        expect(h.controller.viewerCount, 1);
+      });
+    });
+
+    test('畫面的連線斷了：告訴鄉民端結束了，不只是自己收掉', () async {
+      await h.controller.register('教室白板');
+      await h.join('mac-1');
+      h.links.single.lose();
+      await pumpEventQueue();
+
+      expect(h.server.dismissed['mac-1'], ByeReason.boardStopped);
+      expect(h.controller.viewerCount, 0);
+    });
+
+    test('沒傳過照片給它，它卻回報收到：不跳提示', () async {
+      final notices = <String>[];
+      h.controller.notices.listen(notices.add);
+      await h.controller.register('教室白板');
+      await h.join('mac-1', name: '阿明');
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
+      await pumpEventQueue();
+
+      expect(notices, isEmpty);
+    });
+
+    test('同一張照片回報兩次：只跳一次提示', () async {
+      final notices = <String>[];
+      h.controller.notices.listen(notices.add);
+      await h.controller.register('教室白板');
+      await h.joinRecording('mac-1', name: '阿明');
+      await h.controller.takeShot();
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
+      h.server.receive('mac-1', const ShotReceivedMessage(id: 1));
+      await pumpEventQueue();
+
+      expect(notices, ['阿明抄錄了這個內容']);
+    });
+  });
+
+  group('其他', () {
+    test('對焦還沒做完時縮放：不打斷對焦，對焦完再把倍率補上', () async {
+      await h.controller.register('教室白板');
+      await h.join('mac-1');
+      h.camera.applied.clear();
+      final gate = h.camera.nextFocusGate = Completer<void>();
+      final focusing = h.controller.focusAt(0.5, 0.5);
+      await pumpEventQueue();
+      h.controller.pinchStarted();
+      await h.controller.pinchUpdated(2);
+
+      expect(h.camera.applied, hasLength(1), reason: '對焦期間不該再送設定');
+
+      gate.complete();
+      await focusing;
+      expect(h.camera.applied.last.zoom, h.controller.zoom);
+      expect(h.controller.zoom, greaterThan(1));
+    });
+
+    test('換了網路之後重新找位址', () async {
+      await h.controller.register('教室白板');
+      h.lanAddress = '10.0.0.7';
+      await h.controller.refreshAddress();
+
+      expect(h.controller.address, '10.0.0.7:47800');
+    });
+
+    test('廣播途中出問題會提示', () async {
+      final notices = <String>[];
+      h.controller.notices.listen(notices.add);
+      await h.controller.register('教室白板');
+      h.advertiser.emitProblem('廣播停止了');
+      await pumpEventQueue();
+
+      expect(notices, ['廣播停止了']);
+    });
+  });
 }

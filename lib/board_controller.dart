@@ -21,9 +21,16 @@ class BoardController extends ChangeNotifier {
     required this._camera,
     required this._createLink,
     required this._screenAwake,
+    this._answerTimeout = answerTimeout,
+    this._cameraOpenTimeout = const Duration(seconds: 10),
   }) {
-    _messages = _server.messages.listen(_onMessage);
-    _disconnections = _server.disconnections.listen(_viewerGone);
+    _messages = _server.messages.listen(
+      (incoming) => _serial(() => _onMessage(incoming)),
+    );
+    _disconnections = _server.disconnections.listen(
+      (viewerId) => _serial(() => _viewerGone(viewerId)),
+    );
+    _advertiser.onProblem = _advertisingProblem;
   }
 
   final BoardAdvertiser _advertiser;
@@ -39,6 +46,30 @@ class BoardController extends ChangeNotifier {
   final _notices = StreamController<String>.broadcast();
   final Map<String, ViewerLink> _links = {};
   Timer? _tapHoldTimer;
+
+  /// 鄉民端加入之後最多等多久它回覆連線資訊。
+  final Duration _answerTimeout;
+  final Map<String, Timer> _answerTimers = {};
+
+  /// 開鏡頭最多等多久。相機服務沒回應時不能讓後面的事全部卡住。
+  final Duration _cameraOpenTimeout;
+
+  /// 鄉民端的訊息、斷線、「不給看了」、撤銷註冊，一件做完才做下一件。
+  ///
+  /// 處理「加入」要開鏡頭、建連線，中間會等好幾次。不排隊的話，等待的空檔裡
+  /// 另一個鄉民端加入會讓鏡頭開兩次；同一個鄉民端這時斷線，它的連線會一直留著、
+  /// 鏡頭也關不掉。
+  Future<void> _queue = Future.value();
+
+  Future<void> _serial(Future<void> Function() job) {
+    final done = _queue.then((_) => job());
+    // 一件事出錯不能讓後面的全部不做。
+    _queue = done.catchError((Object e) => debugPrint('看板端處理失敗：$e'));
+    return _queue;
+  }
+
+  /// 正在進行中的對焦操作數量。這段時間雙指縮放先不動鏡頭（見 [pinchUpdated]）。
+  int _focusing = 0;
 
   /// 第幾次要求對焦。對焦要一兩秒，連點時舊的那次比較晚回報，不能蓋掉新的。
   int _focusRequest = 0;
@@ -61,6 +92,7 @@ class BoardController extends ChangeNotifier {
   /// 沒註冊，或手機沒連上任何區域網路時是 null。
   String? get address => _address;
   String? _address;
+  int? _port;
 
   /// 上一次操作失敗的原因，可以直接顯示。沒有失敗時是 null。
   String? get error => _error;
@@ -113,6 +145,7 @@ class BoardController extends ChangeNotifier {
         throw const _RegisterFailure('需要相機權限才能註冊');
       }
       final port = await _server.start(boardName: _session.name!);
+      _port = port;
       await _advertiser.start(name: _session.name!, port: port);
       final host = await _findAddress();
       _address = host == null ? null : '$host:$port';
@@ -121,7 +154,8 @@ class BoardController extends ChangeNotifier {
     } on _RegisterFailure catch (e) {
       await _tearDown(ByeReason.boardUnregistered);
       _error = e.message;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('註冊失敗：$e');
       await _tearDown(ByeReason.boardUnregistered);
       _error = '註冊失敗，請確認手機已經連上 Wi-Fi 或開啟熱點';
     } finally {
@@ -141,10 +175,28 @@ class BoardController extends ChangeNotifier {
   }
 
   /// 「不給看了」：所有鄉民端結束觀看，看板仍留在清單上等候。
-  Future<void> stopShowing() async {
+  Future<void> stopShowing() => _serial(() async {
     if (state != BoardState.showing) return;
     await _endAllViewers(ByeReason.boardStopped);
     notifyListeners();
+  });
+
+  /// 重新找一次手機在區域網路上的位址。註冊之後換了 Wi-Fi 或開關熱點，
+  /// 位址會變，畫面上顯示的要跟著變，鄉民端才有辦法手動輸入。
+  Future<void> refreshAddress() async {
+    final port = _port;
+    if (port == null || state == BoardState.unregistered) return;
+    final host = await _findAddress();
+    if (_port != port) return;
+    final next = host == null ? null : '$host:$port';
+    if (next == _address) return;
+    _address = next;
+    notifyListeners();
+  }
+
+  void _advertisingProblem(String message) {
+    debugPrint('廣播出問題：$message');
+    if (state != BoardState.unregistered) _notices.add(message);
   }
 
   Future<void> switchCamera() async {
@@ -165,6 +217,9 @@ class BoardController extends ChangeNotifier {
     if (next == _zoom) return;
     _zoom = next;
     notifyListeners();
+    // 對焦還在進行中：這時送出設定會把對焦打斷（鏡頭的設定是整組換掉的），
+    // 對到的距離就讀不到、也鎖不住。先記下倍率，對焦做完會一起套用。
+    if (_focusing > 0) return;
     // 只改倍率，對焦維持原樣。
     await _tryCameraControl(
       () => _camera.apply(zoom: next, focus: _focus.current),
@@ -201,7 +256,17 @@ class BoardController extends ChangeNotifier {
   Future<void> _applyFocus(FocusCommand command) async {
     if (!_camera.isOpen) return;
     final request = ++_focusRequest;
+    _focusing++;
+    try {
+      await _focusOnce(request, command);
+    } finally {
+      _focusing--;
+    }
+  }
+
+  Future<void> _focusOnce(int request, FocusCommand command) async {
     await _tryCameraControl(() async {
+      final zoomAtStart = _zoom;
       var outcome = await _camera.apply(zoom: _zoom, focus: command);
       if (command is DistanceFocus && !outcome.distanceSupported) {
         // 這支手機不能直接設定對焦距離：改成對畫面中央對焦一次再鎖住。
@@ -212,12 +277,16 @@ class BoardController extends ChangeNotifier {
       }
       // 這次對焦還沒做完，使用者又做了別的對焦操作：這次的結果已經過時了。
       if (request != _focusRequest) return;
-      if (command is ContinuousFocus) return;
-      final pin = _focus.locked(outcome.lockedDistance);
+      final pin = command is ContinuousFocus
+          ? null
+          : _focus.locked(outcome.lockedDistance);
       // 對好焦之後把鏡頭固定在那個距離，相機才不會在畫面變動時自己重新對焦。
       // 這支手機不能直接設定距離時就維持原狀。
       if (pin != null && command is! DistanceFocus) {
         await _camera.apply(zoom: _zoom, focus: pin);
+      } else if (_zoom != zoomAtStart) {
+        // 對焦期間使用者縮放過：現在補上。
+        await _camera.apply(zoom: _zoom, focus: _focus.current);
       }
     });
   }
@@ -234,6 +303,7 @@ class BoardController extends ChangeNotifier {
       final id = ++_lastShotId;
       // 擷取要一點時間，這段期間可能有人抄錄完了或離開了，所以傳之前再看一次。
       for (final viewerId in _recorders.recording) {
+        _recorders.shotSent(viewerId, id);
         _server.send(
           viewerId,
           ShotMessage(
@@ -245,7 +315,8 @@ class BoardController extends ChangeNotifier {
         );
         _server.sendBytes(viewerId, frame.i420);
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('拍照失敗：$e');
       _notices.add('拍照失敗');
     } finally {
       _shooting = false;
@@ -261,7 +332,9 @@ class BoardController extends ChangeNotifier {
     try {
       await control();
       return true;
-    } catch (_) {
+    } catch (e) {
+      // 留一筆紀錄：套件升版後鏡頭控制失效時，原因只會出現在這裡。
+      debugPrint('鏡頭控制失敗：$e');
       return false;
     }
   }
@@ -272,6 +345,7 @@ class BoardController extends ChangeNotifier {
       case JoinMessage():
         await _viewerJoined(viewerId, message);
       case AnswerMessage(:final sdp):
+        _answerTimers.remove(viewerId)?.cancel();
         await _links[viewerId]?.acceptAnswer(sdp);
       case CandidateMessage():
         await _links[viewerId]?.addCandidate(message);
@@ -279,8 +353,9 @@ class BoardController extends ChangeNotifier {
         _recorders.started(viewerId);
       case RecordStopMessage():
         _recorders.stopped(viewerId);
-      case ShotReceivedMessage():
-        final name = _recorders.nameOf(viewerId);
+      case ShotReceivedMessage(:final id):
+        // 真的傳過這一張給它才算數，不然任何連著的鄉民端都能讓看板端跳出提示。
+        final name = _recorders.shotConfirmed(viewerId, id);
         if (name != null) _notices.add(shotSavedNotice(name));
       case ByeMessage():
         await _viewerGone(viewerId);
@@ -303,28 +378,62 @@ class BoardController extends ChangeNotifier {
     }
     try {
       final wasOpen = _camera.isOpen;
-      await _camera.open();
+      await _openCamera();
       // 鏡頭剛開：把對焦套回這次註冊期間的狀態（開關、鎖住的距離）。
-      if (!wasOpen) await _applyFocus(_focus.afterCameraOpened());
+      // 不等它做完：對焦最多要三秒，鄉民端等不到連線資訊會以為看板端沒回應。
+      if (!wasOpen) unawaited(_applyFocus(_focus.afterCameraOpened()));
       final link = await _createLink();
       _links[viewerId] = link;
       _recorders.joined(viewerId, join.name);
       link.onCandidate = (candidate) => _server.send(viewerId, candidate);
       link.onCandidatesDone = () =>
           _server.send(viewerId, const CandidatesDoneMessage());
-      link.onLost = () => _viewerGone(viewerId);
+      link.onLost = () => _serial(() => _viewerLost(viewerId, link));
       _session.viewerJoined(viewerId);
       notifyListeners();
       _server.send(viewerId, OfferMessage(sdp: await link.createOffer()));
-    } catch (_) {
+      _answerTimers[viewerId] = Timer(
+        _answerTimeout,
+        () => _serial(() => _viewerLost(viewerId, link)),
+      );
+    } catch (e) {
+      debugPrint('鄉民端 $viewerId 加入失敗：$e');
       // 鏡頭開不了或連線建不起來：只結束這一個鄉民端，其他人不受影響。
       await _server.dismiss(viewerId, ByeReason.boardStopped);
       await _viewerGone(viewerId);
     }
   }
 
+  Future<void> _openCamera() async {
+    final opening = _camera.open();
+    try {
+      await opening.timeout(_cameraOpenTimeout);
+    } on TimeoutException {
+      // 不等了，但鏡頭之後可能還是開起來：到時沒有人在看就關掉，不能讓它一直開著。
+      unawaited(
+        opening.then(
+          (_) => _serial(() async {
+            if (_links.isEmpty) await _closeCamera();
+          }),
+          onError: (_) {},
+        ),
+      );
+      rethrow;
+    }
+  }
+
+  /// 一個鄉民端的畫面連線斷了，或它加入之後一直沒有回覆：告訴它結束了
+  /// （它那邊可能還以為在看），再照一般的離開處理。
+  Future<void> _viewerLost(String viewerId, ViewerLink link) async {
+    // 排隊等到現在，這個鄉民端可能已經離開，甚至換了一條新的連線。
+    if (!identical(_links[viewerId], link)) return;
+    await _server.dismiss(viewerId, ByeReason.boardStopped);
+    await _viewerGone(viewerId);
+  }
+
   /// 一個鄉民端離開了。最後一個離開時關閉鏡頭、回到等候中。
   Future<void> _viewerGone(String viewerId) async {
+    _answerTimers.remove(viewerId)?.cancel();
     final link = _links.remove(viewerId);
     _recorders.left(viewerId);
     _session.viewerLeft(viewerId);
@@ -340,6 +449,10 @@ class BoardController extends ChangeNotifier {
     final links = _links.values.toList();
     _links.clear();
     _recorders.clear();
+    for (final timer in _answerTimers.values) {
+      timer.cancel();
+    }
+    _answerTimers.clear();
     for (final link in links) {
       await link.close();
     }
@@ -352,7 +465,7 @@ class BoardController extends ChangeNotifier {
     _zoom = minZoom;
   }
 
-  Future<void> _tearDown(ByeReason reason) async {
+  Future<void> _tearDown(ByeReason reason) => _serial(() async {
     // 每一項都要停，其中一項出錯不能讓其他的留著。
     for (final step in <Future<void> Function()>[
       () => _endAllViewers(reason),
@@ -366,11 +479,16 @@ class BoardController extends ChangeNotifier {
     }
     _session.unregister();
     _address = null;
-  }
+    _port = null;
+  });
 
   @override
   void dispose() {
     _tapHoldTimer?.cancel();
+    for (final timer in _answerTimers.values) {
+      timer.cancel();
+    }
+    _advertiser.onProblem = null;
     _notices.close();
     _messages.cancel();
     _disconnections.cancel();

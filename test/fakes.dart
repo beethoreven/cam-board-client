@@ -18,6 +18,14 @@ class FakeAdvertiser implements BoardAdvertiser {
 
   bool get isAdvertising => advertisedName != null;
 
+  void Function(String message)? _onProblem;
+
+  @override
+  set onProblem(void Function(String message)? handler) => _onProblem = handler;
+
+  /// 模擬廣播途中出問題。
+  void emitProblem(String message) => _onProblem?.call(message);
+
   @override
   Future<void> start({required String name, required int port}) async {
     if (failOnStart) throw Exception('廣播失敗');
@@ -150,9 +158,18 @@ class FakeCamera implements CameraSource {
     if (permissionDenied) throw Exception('使用者拒絕相機權限');
   }
 
+  /// 開鏡頭要等這個完成，用來模擬開鏡頭要花時間。null 時馬上開好。
+  Completer<void>? openGate;
+
+  /// 鏡頭實際被開了幾次。
+  int openCount = 0;
+
   @override
   Future<void> open() async {
     if (failOnOpen) throw Exception('鏡頭開不了');
+    if (isOpen) return;
+    openCount++;
+    await openGate?.future;
     isOpen = true;
   }
 
@@ -268,7 +285,11 @@ class Harness {
   /// 建立過的視訊連線，照建立順序。
   final List<FakeLink> links = [];
 
+  /// 鄉民端加入後最多等多久它回覆連線資訊。
+  Duration answerTimeout = const Duration(seconds: 10);
+
   late final BoardController controller = BoardController(
+    answerTimeout: answerTimeout,
     advertiser: advertiser,
     server: server,
     nameStore: store,

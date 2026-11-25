@@ -78,9 +78,18 @@ class WebRtcCameraSource implements CameraSource {
     await close();
   }
 
+  /// 正在開鏡頭的那一次。開到一半又有人要開時等同一次，不能開出兩個鏡頭畫面。
+  Future<void>? _opening;
+
   @override
-  Future<void> open() async {
-    if (isOpen) return;
+  Future<void> open() {
+    if (isOpen) return Future.value();
+    return _opening ??= _open().whenComplete(() {
+      _opening = null;
+    });
+  }
+
+  Future<void> _open() async {
     if (!_rendererReady) {
       await _renderer.initialize();
       _rendererReady = true;

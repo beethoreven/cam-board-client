@@ -23,6 +23,9 @@ void main() {
   Future<void> viewerJoins(WidgetTester tester, String viewerId) async {
     h.server.receive(viewerId, const JoinMessage());
     await tester.pumpAndSettle();
+    // 正常的鄉民端會回覆連線資訊；不回覆的話看板端等一陣子就會結束它。
+    h.server.receive(viewerId, const AnswerMessage(sdp: 'answer-sdp'));
+    await tester.pumpAndSettle();
   }
 
   setUp(() => h = Harness());
@@ -227,6 +230,9 @@ void main() {
       await register(tester);
       h.server.receive('mac-1', const JoinMessage(name: '阿明'));
       h.server.receive('mac-2', const JoinMessage(name: '小華'));
+      await tester.pumpAndSettle();
+      h.server.receive('mac-1', const AnswerMessage(sdp: 'answer-sdp'));
+      h.server.receive('mac-2', const AnswerMessage(sdp: 'answer-sdp'));
       await tester.pumpAndSettle();
       h.server.receive('mac-1', const RecordStartMessage());
       h.server.receive('mac-2', const RecordStartMessage());

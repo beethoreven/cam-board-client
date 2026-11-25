@@ -161,4 +161,82 @@ void main() {
     await settle();
     expect((viewer.received.single as HelloMessage).name, '第二次');
   });
+
+  group('不該進來的連線', () {
+    test('從網頁發出的連線（帶 Origin）被拒絕', () async {
+      final port = await server.start(boardName: '教室白板');
+
+      await expectLater(
+        WebSocket.connect(
+          'ws://127.0.0.1:$port',
+          headers: {'Origin': 'https://example.com'},
+        ),
+        throwsA(isA<WebSocketException>()),
+      );
+    });
+
+    test('超過連線數上限的被拒絕，有人離開之後又連得進來', () async {
+      server = WebSocketSignalServer(preferredPort: 0, maxViewers: 2);
+      final port = await server.start(boardName: '教室白板');
+      final first = await connect(port);
+      await connect(port);
+      await settle();
+
+      await expectLater(
+        WebSocket.connect('ws://127.0.0.1:$port'),
+        throwsA(isA<WebSocketException>()),
+      );
+
+      await first.socket.close();
+      await settle();
+      final third = await connect(port);
+      await settle();
+      expect(third.received.single, isA<HelloMessage>());
+    });
+
+    test('連上之後一直不說話的會被關掉，並通報它走了', () async {
+      server = WebSocketSignalServer(
+        preferredPort: 0,
+        silenceTimeout: const Duration(milliseconds: 150),
+      );
+      final port = await server.start(boardName: '教室白板');
+      final gone = <String>[];
+      server.disconnections.listen(gone.add);
+      final viewer = await connect(port);
+
+      await viewer.done.timeout(const Duration(seconds: 2));
+      expect(gone, hasLength(1));
+    });
+
+    test('說過話的不會因為安靜而被關掉', () async {
+      server = WebSocketSignalServer(
+        preferredPort: 0,
+        silenceTimeout: const Duration(milliseconds: 150),
+      );
+      final port = await server.start(boardName: '教室白板');
+      final gone = <String>[];
+      server.disconnections.listen(gone.add);
+      final viewer = await connect(port);
+      viewer.socket.add(const JoinMessage().encode());
+
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      expect(gone, isEmpty);
+    });
+
+    test('送來超大訊息或二進位資料的會被關掉', () async {
+      final port = await server.start(boardName: '教室白板');
+      final gone = <String>[];
+      server.disconnections.listen(gone.add);
+
+      final big = await connect(port);
+      big.socket.add('x' * (WebSocketSignalServer.maxMessageLength + 1));
+      await big.done.timeout(const Duration(seconds: 2));
+
+      final binary = await connect(port);
+      binary.socket.add([1, 2, 3]);
+      await binary.done.timeout(const Duration(seconds: 2));
+
+      expect(gone, hasLength(2));
+    });
+  });
 }

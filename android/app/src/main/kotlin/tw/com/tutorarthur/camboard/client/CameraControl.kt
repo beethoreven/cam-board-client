@@ -157,10 +157,23 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
         val reply = Reply(result, zoom)
         Log.i(TAG, "apply zoom=$zoom focus=$focus crop=$crop")
 
+        // 這顆鏡頭支援哪些對焦方式。固定焦距的鏡頭（多半是前鏡頭）只有「關閉」一種：
+        // 對它要求對焦不會有任何回報，只會白等到逾時。
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: IntArray(0)
+        val canFocus = afModes.contains(CameraMetadata.CONTROL_AF_MODE_AUTO)
+        if (!canFocus && (focus == "hold" || focus == "point")) {
+            // 沒有東西可以對：只套用倍率，馬上回報（沒有對焦距離）。
+            s.captureSession.setRepeatingRequest(request().build(), LensWatch("fixed").callback, s.handler)
+            reply.send()
+            return
+        }
+
         when (focus) {
             "continuous" -> {
                 val builder = request()
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                if (afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)) {
+                    builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                }
                 s.captureSession.setRepeatingRequest(builder.build(), LensWatch("continuous").callback, s.handler)
                 reply.send()
             }
