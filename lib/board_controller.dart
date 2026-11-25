@@ -212,7 +212,13 @@ class BoardController extends ChangeNotifier {
       }
       // 這次對焦還沒做完，使用者又做了別的對焦操作：這次的結果已經過時了。
       if (request != _focusRequest) return;
-      if (command is! ContinuousFocus) _focus.locked(outcome.lockedDistance);
+      if (command is ContinuousFocus) return;
+      final pin = _focus.locked(outcome.lockedDistance);
+      // 對好焦之後把鏡頭固定在那個距離，相機才不會在畫面變動時自己重新對焦。
+      // 這支手機不能直接設定距離時就維持原狀。
+      if (pin != null && command is! DistanceFocus) {
+        await _camera.apply(zoom: _zoom, focus: pin);
+      }
     });
   }
 

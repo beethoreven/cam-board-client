@@ -126,6 +126,17 @@ class FakeCamera implements CameraSource {
   List<double> get zooms => [for (final a in applied) a.zoom];
   List<FocusCommand> get focuses => [for (final a in applied) a.focus];
 
+  /// 對焦的每一步，不含「對好焦之後自動補上的固定距離」（緊接在 [HoldFocus]
+  /// 或 [PointFocus] 後面的 [DistanceFocus]）。
+  List<FocusCommand> get focusSteps => [
+    for (var i = 0; i < applied.length; i++)
+      if (!(applied[i].focus is DistanceFocus &&
+          i > 0 &&
+          (applied[i - 1].focus is HoldFocus ||
+              applied[i - 1].focus is PointFocus)))
+        applied[i].focus,
+  ];
+
   @override
   bool isOpen = false;
 

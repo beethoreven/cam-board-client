@@ -165,7 +165,7 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
             "continuous" -> {
                 val builder = request()
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                s.captureSession.setRepeatingRequest(builder.build(), null, s.handler)
+                s.captureSession.setRepeatingRequest(builder.build(), LensWatch("continuous").callback, s.handler)
                 reply.send()
             }
 
@@ -174,6 +174,7 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
                 val builder = request()
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
                 var seen = 0
+                val lens = LensWatch("hold")
                 s.captureSession.setRepeatingRequest(
                     builder.build(),
                     object : CameraCaptureSession.CaptureCallback() {
@@ -182,6 +183,7 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
                             request: CaptureRequest,
                             total: TotalCaptureResult,
                         ) {
+                            lens.see(total)
                             // 前幾張可能還是切換前的設定，多等幾張再讀對焦距離。
                             if (++seen < 5) return
                             reply.distance = total.get(CaptureResult.LENS_FOCUS_DISTANCE)
@@ -206,12 +208,14 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
                 var triggered = false
                 var scanning = false
                 var sinceTrigger = 0
+                val lens = LensWatch("point")
                 val watch = object : CameraCaptureSession.CaptureCallback() {
                     override fun onCaptureCompleted(
                         session: CameraCaptureSession,
                         request: CaptureRequest,
                         total: TotalCaptureResult,
                     ) {
+                        lens.see(total)
                         if (request.get(CaptureRequest.CONTROL_AF_TRIGGER) == CameraMetadata.CONTROL_AF_TRIGGER_START) {
                             triggered = true
                         }
@@ -249,12 +253,45 @@ class CameraControl(private val activity: Activity) : MethodChannel.MethodCallHa
                 val builder = request()
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                 builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, distance.toFloat().coerceIn(0f, nearest))
-                s.captureSession.setRepeatingRequest(builder.build(), null, s.handler)
+                s.captureSession.setRepeatingRequest(builder.build(), LensWatch("distance").callback, s.handler)
                 reply.distance = distance.toFloat()
                 reply.send()
             }
 
             else -> error("不認得的對焦方式：$focus")
+        }
+    }
+
+    /**
+     * 記下鏡頭實際在做什麼：對焦狀態一變、或鏡頭位置移動超過一點點，就寫一筆紀錄。
+     * 用來從紀錄判斷「關掉自動對焦之後鏡頭有沒有自己動」，不影響行為。
+     */
+    private inner class LensWatch(private val mode: String) {
+        private var lastState: Int? = null
+        private var lastDistance: Float? = null
+
+        fun see(total: TotalCaptureResult) {
+            val state = total.get(CaptureResult.CONTROL_AF_STATE)
+            val distance = total.get(CaptureResult.LENS_FOCUS_DISTANCE)
+            val before = lastDistance
+            val moved = distance != null && (before == null || Math.abs(distance - before) > 0.05f)
+            if (state == lastState && !moved) return
+            Log.i(
+                TAG,
+                "lens mode=$mode afMode=${total.get(CaptureResult.CONTROL_AF_MODE)} " +
+                    "afState=$state distance=$distance lensState=${total.get(CaptureResult.LENS_STATE)}",
+            )
+            lastState = state
+            if (moved) lastDistance = distance
+        }
+
+        /** 只觀察、不做別的事的回呼。 */
+        val callback = object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(
+                session: CameraCaptureSession,
+                request: CaptureRequest,
+                total: TotalCaptureResult,
+            ) = see(total)
         }
     }
 

@@ -344,7 +344,7 @@ void main() {
       await h.controller.focusAt(0.25, 0.75);
       await h.controller.focusAt(1.4, -0.2);
 
-      expect(h.camera.focuses, [
+      expect(h.camera.focusSteps, [
         const PointFocus(0.25, 0.75),
         const PointFocus(1.0, 0.0),
       ]);
@@ -355,10 +355,13 @@ void main() {
       await h.controller.pinchUpdated(3);
       await h.controller.focusAt(0.5, 0.5);
 
-      expect(h.camera.applied.last, (
+      // 對焦和接著補上的固定距離，都帶著同一個倍率。
+      final steps = h.camera.applied;
+      expect(steps[steps.length - 2], (
         zoom: 3.0,
         focus: const PointFocus(0.5, 0.5),
       ));
+      expect(steps.last, (zoom: 3.0, focus: const DistanceFocus(2.5)));
       expect(h.controller.zoom, 3);
     });
 
@@ -437,13 +440,13 @@ void main() {
       fakeAsync((async) {
         h.controller.focusAt(0.3, 0.3);
         async.flushMicrotasks();
-        expect(h.camera.focuses, [const PointFocus(0.3, 0.3)]);
+        expect(h.camera.focusSteps, [const PointFocus(0.3, 0.3)]);
 
         async.elapse(tapFocusHold - const Duration(milliseconds: 1));
-        expect(h.camera.focuses, hasLength(1));
+        expect(h.camera.focusSteps, hasLength(1));
 
         async.elapse(const Duration(milliseconds: 1));
-        expect(h.camera.focuses.last, isA<ContinuousFocus>());
+        expect(h.camera.focusSteps.last, isA<ContinuousFocus>());
       });
     });
 
@@ -454,13 +457,13 @@ void main() {
         h.controller.focusAt(0.6, 0.6);
         async.elapse(const Duration(seconds: 4));
 
-        expect(h.camera.focuses, [
+        expect(h.camera.focusSteps, [
           const PointFocus(0.3, 0.3),
           const PointFocus(0.6, 0.6),
         ]);
 
         async.elapse(const Duration(seconds: 1));
-        expect(h.camera.focuses.last, isA<ContinuousFocus>());
+        expect(h.camera.focusSteps.last, isA<ContinuousFocus>());
       });
     });
 
@@ -479,14 +482,43 @@ void main() {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(2);
 
-      expect(h.camera.focuses.last, const DistanceFocus(7.0));
+      expect(h.camera.focusSteps.last, const DistanceFocus(7.0));
     });
 
     test('關掉開關：停在目前的位置', () async {
       await h.controller.setAutoFocus(false);
 
       expect(h.controller.autoFocus, isFalse);
-      expect(h.camera.focuses.single, isA<HoldFocus>());
+      expect(h.camera.focusSteps.single, isA<HoldFocus>());
+    });
+
+    test('關掉開關：鏡頭回報距離後，直接固定在那個距離', () async {
+      h.camera.reportedDistance = 4.2;
+      await h.controller.setAutoFocus(false);
+
+      expect(h.camera.focuses, [isA<HoldFocus>(), const DistanceFocus(4.2)]);
+    });
+
+    test('關著時點擊對焦：對好之後固定在新的距離', () async {
+      await h.controller.setAutoFocus(false);
+      h.camera.reportedDistance = 9.0;
+      await h.controller.focusAt(0.3, 0.3);
+
+      expect(h.camera.focuses.last, const DistanceFocus(9.0));
+    });
+
+    test('鏡頭沒回報距離時，不另外固定', () async {
+      h.camera.reportedDistance = null;
+      await h.controller.setAutoFocus(false);
+
+      expect(h.camera.focuses, [isA<HoldFocus>()]);
+    });
+
+    test('這支手機不能直接設定距離時，固定失敗也不會一直重試', () async {
+      h.camera.distanceUnsupported = true;
+      await h.controller.setAutoFocus(false);
+
+      expect(h.camera.focuses, [isA<HoldFocus>(), const DistanceFocus(2.5)]);
     });
 
     test('關著時點擊對焦：過多久都不會恢復自動對焦', () {
@@ -495,7 +527,7 @@ void main() {
         h.controller.focusAt(0.3, 0.3);
         async.elapse(tapFocusHold * 3);
 
-        expect(h.camera.focuses, [
+        expect(h.camera.focusSteps, [
           isA<HoldFocus>(),
           const PointFocus(0.3, 0.3),
         ]);
@@ -509,7 +541,7 @@ void main() {
         h.controller.setAutoFocus(false);
         async.elapse(tapFocusHold * 2);
 
-        expect(h.camera.focuses.last, isA<HoldFocus>());
+        expect(h.camera.focusSteps.last, isA<HoldFocus>());
       });
     });
 
@@ -517,7 +549,7 @@ void main() {
       await h.controller.setAutoFocus(false);
       await h.controller.setAutoFocus(true);
 
-      expect(h.camera.focuses.last, isA<ContinuousFocus>());
+      expect(h.camera.focusSteps.last, isA<ContinuousFocus>());
     });
 
     test('鄉民端離開再回來，鏡頭重開時套回鎖住的對焦距離', () async {
@@ -548,7 +580,7 @@ void main() {
 
       await h.join('mac-2');
 
-      expect(h.camera.focuses, [
+      expect(h.camera.focusSteps, [
         const DistanceFocus(4.2),
         const PointFocus(0.5, 0.5),
       ]);
@@ -558,7 +590,7 @@ void main() {
       await h.controller.setAutoFocus(false);
       await h.controller.switchCamera();
 
-      expect(h.camera.focuses.last, const PointFocus(0.5, 0.5));
+      expect(h.camera.focusSteps.last, const PointFocus(0.5, 0.5));
     });
 
     test('撤銷註冊後重新註冊，開關回到開著', () async {

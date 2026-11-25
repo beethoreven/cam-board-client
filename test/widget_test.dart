@@ -154,7 +154,7 @@ void main() {
       await tester.tap(find.byKey(const Key('preview')));
       await tester.pumpAndSettle();
 
-      final focus = h.camera.focuses.last as PointFocus;
+      final focus = h.camera.focusSteps.last as PointFocus;
       expect(focus.x, closeTo(0.5, 0.01));
       expect(focus.y, closeTo(0.5, 0.01));
       // 點擊對焦後有一個 5 秒的計時，讓它跑完。
@@ -170,15 +170,15 @@ void main() {
       final box = tester.getRect(find.byKey(const Key('preview')));
       final videoWidth = box.height * 0.2;
       final videoLeft = box.center.dx - videoWidth / 2;
-      final before = h.camera.focuses.length;
+      final before = h.camera.focusSteps.length;
 
       await tester.tapAt(Offset(box.left + 2, box.center.dy));
       await tester.pump();
-      expect(h.camera.focuses, hasLength(before));
+      expect(h.camera.focusSteps, hasLength(before));
 
       await tester.tapAt(Offset(videoLeft + 1, box.center.dy));
       await tester.pump();
-      final focus = h.camera.focuses.last as PointFocus;
+      final focus = h.camera.focusSteps.last as PointFocus;
       expect(focus.x, closeTo(0, 0.02));
       expect(focus.y, closeTo(0.5, 0.01));
       await tester.pump(tapFocusHold);
@@ -200,7 +200,7 @@ void main() {
         tester.widget<Switch>(find.byKey(const Key('autoFocus'))).value,
         isFalse,
       );
-      expect(h.camera.focuses.last, isA<HoldFocus>());
+      expect(h.camera.focusSteps.last, isA<HoldFocus>());
     });
 
     testWidgets('按「拍照」把照片傳給抄錄中的鄉民端，存好後跳出提示', (tester) async {
