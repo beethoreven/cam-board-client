@@ -2,6 +2,7 @@ import 'package:cam_board_core/cam_board_core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'camera_source.dart';
+import 'debug_log.dart';
 
 /// 看板端對「一個」鄉民端的視訊連線。每個鄉民端各有一條。
 abstract interface class ViewerLink {
@@ -31,7 +32,19 @@ typedef ViewerLinkFactory = Future<ViewerLink> Function();
 
 /// 用 WebRTC 實作：只送畫面、不送聲音、不接收任何東西。
 class WebRtcViewerLink implements ViewerLink {
-  WebRtcViewerLink._(this._connection, this._sender);
+  WebRtcViewerLink._(this._connection, this._sender)
+    : _log = ConnectionLog(_connection, '看板端#${++_created}', const {
+        'outbound-rtp',
+        'remote-inbound-rtp',
+        'candidate-pair',
+        'transport',
+      });
+
+  /// 建立過幾條連線，只用來在紀錄裡分辨是哪一條。
+  static int _created = 0;
+
+  /// 查問題用的紀錄，不影響連線本身。
+  final ConnectionLog _log;
 
   /// 畫質上限。區域網路的頻寬遠大於這個數字，設上限是為了不讓手機過熱。
   static const _maxBitrate = 8000000;
@@ -86,12 +99,18 @@ class WebRtcViewerLink implements ViewerLink {
         ),
       );
     };
+    connection.onIceConnectionState = (state) =>
+        link._log.stateChanged('ICE', state);
+    connection.onSignalingState = (state) =>
+        link._log.stateChanged('交換連線資訊', state);
     connection.onIceGatheringState = (state) {
+      link._log.stateChanged('找網路路徑', state);
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
         link._onCandidatesDone?.call();
       }
     };
     connection.onConnectionState = (state) {
+      link._log.stateChanged('整體', state);
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         link._reportLost();
@@ -132,6 +151,7 @@ class WebRtcViewerLink implements ViewerLink {
     );
     await _candidates.open();
     await _preferResolution();
+    _log.start();
   }
 
   /// 網路變差時降低每秒張數，不降解析度。手寫紙的畫面多半是靜止的，
@@ -158,6 +178,7 @@ class WebRtcViewerLink implements ViewerLink {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _log.stop();
     await _connection.close();
   }
 }
