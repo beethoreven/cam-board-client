@@ -28,7 +28,10 @@ class BoardController extends ChangeNotifier {
       (incoming) => _serial(() => _onMessage(incoming)),
     );
     _disconnections = _server.disconnections.listen(
-      (viewerId) => _serial(() => _viewerGone(viewerId)),
+      (viewerId) => _serial(() {
+        debugPrint('鄉民端 $viewerId 的連線斷了');
+        return _viewerGone(viewerId);
+      }),
     );
     _advertiser.onProblem = _advertisingProblem;
   }
@@ -74,6 +77,13 @@ class BoardController extends ChangeNotifier {
   /// 第幾次要求對焦。對焦要一兩秒，連點時舊的那次比較晚回報，不能蓋掉新的。
   int _focusRequest = 0;
   int _lastShotId = 0;
+
+  /// 送出去、還沒回報收到的照片，只用來留紀錄（查「拍照沒反應」時看 logcat）。
+  /// 鍵是「鄉民端#照片編號」。
+  final Map<String, ({Stopwatch clock, Timer warning})> _shotTraces = {};
+
+  /// 照片送出後這麼久還沒回報收到，就留一筆紀錄。正常情況不到一秒。
+  static const _shotSlowAfter = Duration(seconds: 5);
   late final StreamSubscription<ViewerMessage> _messages;
   late final StreamSubscription<String> _disconnections;
 
@@ -314,6 +324,7 @@ class BoardController extends ChangeNotifier {
           ),
         );
         _server.sendBytes(viewerId, frame.i420);
+        _traceShotSent(viewerId, id, frame.i420.length);
       }
     } catch (e) {
       debugPrint('拍照失敗：$e');
@@ -321,6 +332,43 @@ class BoardController extends ChangeNotifier {
     } finally {
       _shooting = false;
       notifyListeners();
+    }
+  }
+
+  void _traceShotSent(String viewerId, int id, int bytes) {
+    debugPrint('照片 $id 送給 $viewerId（$bytes bytes）');
+    final clock = Stopwatch()..start();
+    _shotTraces['$viewerId#$id'] = (
+      clock: clock,
+      warning: Timer(_shotSlowAfter, () {
+        debugPrint(
+          '照片 $id 送給 $viewerId 已經 ${clock.elapsed.inSeconds} 秒，'
+          '還沒回報收到；還在等回報的有 ${_shotTraces.keys.join('、')}',
+        );
+      }),
+    );
+  }
+
+  void _traceShotConfirmed(String viewerId, int id) {
+    final trace = _shotTraces.remove('$viewerId#$id');
+    trace?.warning.cancel();
+    debugPrint(
+      '照片 $id：$viewerId 回報收到'
+      '${trace == null ? '（沒有送過這一張）' : '，花了 ${trace.clock.elapsedMilliseconds} 毫秒'}',
+    );
+  }
+
+  /// 這個鄉民端走了（[viewerId] 是 null 時是全部都走了）：它還沒回報的照片不用再等。
+  void _dropShotTraces([String? viewerId]) {
+    final keys = _shotTraces.keys
+        .where((key) => viewerId == null || key.startsWith('$viewerId#'))
+        .toList();
+    for (final key in keys) {
+      final trace = _shotTraces.remove(key)!;
+      trace.warning.cancel();
+      debugPrint(
+        '照片 $key 沒等到回報，鄉民端就離開了（等了 ${trace.clock.elapsed.inSeconds} 秒）',
+      );
     }
   }
 
@@ -354,6 +402,7 @@ class BoardController extends ChangeNotifier {
       case RecordStopMessage():
         _recorders.stopped(viewerId);
       case ShotReceivedMessage(:final id):
+        _traceShotConfirmed(viewerId, id);
         // 真的傳過這一張給它才算數，不然任何連著的鄉民端都能讓看板端跳出提示。
         final name = _recorders.shotConfirmed(viewerId, id);
         if (name != null) _notices.add(shotSavedNotice(name));
@@ -434,6 +483,7 @@ class BoardController extends ChangeNotifier {
   /// 一個鄉民端離開了。最後一個離開時關閉鏡頭、回到等候中。
   Future<void> _viewerGone(String viewerId) async {
     _answerTimers.remove(viewerId)?.cancel();
+    _dropShotTraces(viewerId);
     final link = _links.remove(viewerId);
     _recorders.left(viewerId);
     _session.viewerLeft(viewerId);
@@ -449,6 +499,7 @@ class BoardController extends ChangeNotifier {
     final links = _links.values.toList();
     _links.clear();
     _recorders.clear();
+    _dropShotTraces();
     for (final timer in _answerTimers.values) {
       timer.cancel();
     }
@@ -487,6 +538,9 @@ class BoardController extends ChangeNotifier {
     _tapHoldTimer?.cancel();
     for (final timer in _answerTimers.values) {
       timer.cancel();
+    }
+    for (final trace in _shotTraces.values) {
+      trace.warning.cancel();
     }
     _advertiser.onProblem = null;
     _notices.close();
