@@ -369,11 +369,19 @@ class BoardController extends ChangeNotifier {
   Future<void> takeShot() async {
     if (_shooting || state != BoardState.showing) return;
     if (_recorders.recording.isEmpty) return;
-    // 前面的照片還沒送到（鄉民端那邊卡住了）就先不拍，不然只會越積越多。
-    if (!_recorders.hasRoomFor(_lastFrameBytes)) {
-      debugPrint('暫存滿了（${_recorders.pendingBytes} bytes 還沒確認），這次不拍');
-      _notices.add(shotsBackedUpNotice);
-      return;
+    // 暫存滿了（鄉民端那邊一直沒回報）：丟掉最舊的騰出位置，新的照樣拍。
+    // 正常情況下每一張十秒內不是被確認就是被放棄，滿不了；這裡是保險，
+    // 不能因為暫存滿了就擋著不給拍。
+    while (!_recorders.hasRoomFor(_lastFrameBytes)) {
+      final dropped = _recorders.dropOldest();
+      if (dropped.isEmpty) break;
+      for (final lost in dropped) {
+        debugPrint('暫存滿了，放棄照片 ${lost.id}（${lost.viewerId} 還沒收到）');
+        final key = '${lost.viewerId}#${lost.id}';
+        _giveUpTimers.remove(key)?.cancel();
+        _shotTraces.remove(key)?.warning.cancel();
+        _notices.add(shotLostNotice(lost.name));
+      }
     }
     _shooting = true;
     notifyListeners();

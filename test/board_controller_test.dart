@@ -1183,7 +1183,7 @@ void main() {
       });
     });
 
-    test('暫存滿了就這次不拍，並告訴使用者', () {
+    test('暫存滿了：丟掉最舊的，新的照樣拍，並告訴使用者哪一張沒送到', () {
       fakeAsync((async) {
         final notices = <String>[];
         h.controller.notices.listen(notices.add);
@@ -1207,14 +1207,27 @@ void main() {
           async.flushMicrotasks();
         }
 
-        expect(h.camera.captureCount, fits);
-        expect(notices, ['前面的照片還在傳，請等一下再拍', '前面的照片還在傳，請等一下再拍']);
+        // 每一次都拍得成，不會被擋住。
+        expect(h.camera.captureCount, fits + 2);
+        expect(
+          h.server.sent['mac-1']!.whereType<ShotMessage>(),
+          hasLength(fits + 2),
+        );
+        // 最舊的兩張被丟掉，各提示一次。
+        expect(notices, ['阿明沒收到這張，請再拍一次', '阿明沒收到這張，請再拍一次']);
 
-        // 等到前面的被放棄，就又可以拍了。
-        async.elapse(const Duration(seconds: 11));
-        h.controller.takeShot();
+        // 被丟掉的不再補送：接回來時只補還留著的那幾張。
+        h.server.sent['mac-1']!.clear();
+        h.server.receive('new-socket', const ResumeMessage(session: 's1'));
         async.flushMicrotasks();
-        expect(h.camera.captureCount, fits + 1);
+        expect(
+          h.server.sent['mac-1']!.whereType<ShotMessage>().map((s) => s.id),
+          [for (var id = 3; id <= fits + 2; id++) id],
+        );
+
+        // 留著的那些時間到了照樣放棄，之後不會再為被丟掉的兩張多跳提示。
+        async.elapse(const Duration(seconds: 11));
+        expect(notices, hasLength(2 + fits));
       });
     });
   });
