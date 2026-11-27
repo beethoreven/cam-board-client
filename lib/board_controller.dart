@@ -196,6 +196,7 @@ class BoardController extends ChangeNotifier {
       _address = host == null ? null : '$host:$port';
       await _nameStore.save(_session.name!);
       await _screenAwake.enable();
+      debugPrint('註冊成功：${_session.name}，位址 $_address，鏡頭已開');
     } on _RegisterFailure catch (e) {
       await _tearDown(ByeReason.boardUnregistered);
       _error = e.message;
@@ -249,6 +250,7 @@ class BoardController extends ChangeNotifier {
     if (_camera.isOpen) {
       try {
         await _camera.captureFrame();
+        debugPrint('回到前景：鏡頭還有畫面');
         return;
       } catch (e) {
         debugPrint('鏡頭沒有畫面了，重開：$e');
@@ -741,6 +743,7 @@ class BoardController extends ChangeNotifier {
     _session.unregister();
     _address = null;
     _port = null;
+    debugPrint('已撤銷註冊（或註冊沒成功），鏡頭已關');
   });
 
   @override

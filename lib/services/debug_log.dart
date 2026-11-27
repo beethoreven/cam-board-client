@@ -16,7 +16,7 @@ const _maxLogBytes = 20 * 1024 * 1024;
 /// 電腦上的只在執行它的終端機裡。
 String? startDebugLogFile(String fileName) {
   try {
-    final file = File('${Directory.systemTemp.path}/$fileName');
+    final file = File('${_logFolder()}/$fileName');
     if (file.existsSync() && file.lengthSync() > _maxLogBytes) {
       file.renameSync('${file.path}.old');
     }
@@ -35,6 +35,14 @@ String? startDebugLogFile(String fileName) {
   } catch (_) {
     return null;
   }
+}
+
+/// 紀錄檔放哪裡。優先放 App 自己的 files 資料夾：暫存資料夾（code_cache）每次
+/// 重裝 App 都會被系統清掉，查問題時常常要重裝，紀錄就沒了。找不到才退回暫存資料夾。
+String _logFolder() {
+  final temp = Directory.systemTemp;
+  final files = Directory('${temp.parent.path}/files');
+  return files.existsSync() ? files.path : temp.path;
 }
 
 /// 每秒把一條視訊連線的統計記下來，連線狀態一變也記。
