@@ -25,7 +25,7 @@ void main() {
       expect(h.server.running, isTrue);
       expect(h.store.saved, '教室白板');
       expect(h.awake.enabled, isTrue);
-      expect(h.camera.isOpen, isTrue, reason: '註冊期間鏡頭一直開著');
+      expect(h.camera.isOpen, isFalse, reason: '沒人在看時不該開著鏡頭');
     });
 
     test('名字不合規定：不註冊，也不碰網路', () async {
@@ -203,14 +203,13 @@ void main() {
       expect(h.camera.isOpen, isTrue);
     });
 
-    test('最後一個人離開：回到等候中，鏡頭不關', () async {
+    test('最後一個人離開：關鏡頭，回到等候中', () async {
       await h.join('mac-1');
       h.server.receive('mac-1', const ByeMessage(ByeReason.viewerLeft));
       await pumpEventQueue();
 
       expect(h.controller.state, BoardState.waiting);
-      expect(h.camera.isOpen, isTrue);
-      expect(h.camera.openCount, 1, reason: '鏡頭沒有被關了又開');
+      expect(h.camera.isOpen, isFalse);
       expect(h.advertiser.isAdvertising, isTrue, reason: '看板仍然在清單上');
     });
 
@@ -229,7 +228,7 @@ void main() {
       await pumpEventQueue();
 
       expect(h.controller.state, BoardState.waiting);
-      expect(h.camera.isOpen, isTrue);
+      expect(h.camera.isOpen, isFalse);
     });
 
     test('鏡頭被系統收走又開不回來：只結束這個鄉民端，看板仍在等候', () async {
@@ -257,7 +256,7 @@ void main() {
       await h.join('mac-2');
     });
 
-    test('「不給看了」：通知所有鄉民端，看板仍在清單上，鏡頭不關', () async {
+    test('「不給看了」：通知所有鄉民端、關鏡頭，看板仍在清單上', () async {
       await h.controller.stopShowing();
 
       expect(h.server.dismissed, {
@@ -265,7 +264,7 @@ void main() {
         'mac-2': ByeReason.boardStopped,
       });
       expect(h.links.every((link) => link.closed), isTrue);
-      expect(h.camera.isOpen, isTrue);
+      expect(h.camera.isOpen, isFalse);
       expect(h.controller.state, BoardState.waiting);
       expect(h.advertiser.isAdvertising, isTrue);
       expect(h.server.running, isTrue);
@@ -409,16 +408,12 @@ void main() {
       ));
     });
 
-    test('所有人離開後倍率不變，撤銷註冊才回到 1 倍', () async {
+    test('所有人離開後倍率回到 1 倍', () async {
       h.controller.pinchStarted();
       await h.controller.pinchUpdated(3);
       await h.controller.stopShowing();
-      expect(h.controller.zoom, 3);
-
-      await h.controller.unregister();
 
       expect(h.controller.zoom, minZoom);
-      expect(h.camera.isOpen, isFalse);
     });
   });
 
@@ -555,6 +550,24 @@ void main() {
       await h.controller.setAutoFocus(true);
 
       expect(h.camera.focusSteps.last, isA<ContinuousFocus>());
+    });
+
+    test('鄉民端離開再回來，鏡頭重開時套回鎖住的對焦距離', () async {
+      h.camera.reportedDistance = 4.2;
+      await h.controller.setAutoFocus(false);
+      await h.controller.focusAt(0.5, 0.5);
+      h.server.drop('mac-1');
+      await pumpEventQueue();
+      expect(h.camera.isOpen, isFalse);
+      h.camera.applied.clear();
+
+      await h.join('mac-2');
+
+      expect(h.controller.autoFocus, isFalse);
+      expect(h.camera.applied.single, (
+        zoom: minZoom,
+        focus: const DistanceFocus(4.2),
+      ));
     });
 
     test('鏡頭被系統收走，回到前景重開時套回鎖住的對焦距離', () async {
@@ -771,7 +784,7 @@ void main() {
   });
 
   group('鄉民端沒有照規矩來', () {
-    test('加入之後一直不回覆連線資訊：時間到就結束它', () {
+    test('加入之後一直不回覆連線資訊：時間到就結束它，鏡頭關掉', () {
       fakeAsync((async) {
         h.controller.register('教室白板');
         async.flushMicrotasks();
@@ -783,6 +796,7 @@ void main() {
 
         expect(h.server.dismissed['mac-1'], ByeReason.boardStopped);
         expect(h.controller.viewerCount, 0);
+        expect(h.camera.isOpen, isFalse);
       });
     });
 
@@ -873,47 +887,63 @@ void main() {
     });
   });
 
-  group('註冊後就開鏡頭', () {
-    test('鏡頭開不了：註冊失敗，退回未註冊', () async {
-      h.camera.failOnOpen = true;
-      await h.controller.register('教室白板');
+  group('鏡頭跟著鄉民端開關', () {
+    setUp(() => h.controller.register('教室白板'));
 
-      expect(h.controller.state, BoardState.unregistered);
-      expect(h.controller.error, contains('鏡頭'));
-      expect(h.server.running, isFalse);
-      expect(h.advertiser.isAdvertising, isFalse);
+    test('註冊後沒有人在看：鏡頭不開', () async {
+      expect(h.camera.isOpen, isFalse);
+      expect(h.camera.openCount, 0);
     });
 
-    test('鄉民端來來去去，鏡頭只開過一次', () async {
-      await h.controller.register('教室白板');
+    test('第一個鄉民端來才開，還有人在看就不關', () async {
       await h.join('mac-1');
+      await h.join('mac-2');
       h.server.receive('mac-1', const ByeMessage(ByeReason.viewerLeft));
       await pumpEventQueue();
-      await h.join('mac-2');
 
+      expect(h.camera.isOpen, isTrue);
       expect(h.camera.openCount, 1);
     });
 
-    test('回到前景時鏡頭還有畫面：什麼都不做', () async {
-      await h.controller.register('教室白板');
+    test('重建視訊連線不會把鏡頭關掉再開', () async {
+      await h.join('mac-1', session: 's1');
+      h.server.receive('mac-1', const VideoRestartMessage());
+      await pumpEventQueue();
+
+      expect(h.camera.isOpen, isTrue);
+      expect(h.camera.openCount, 1);
+    });
+
+    test('換一條新的連線接回來也不會動到鏡頭', () async {
+      await h.join('mac-1', session: 's1');
+      h.server.receive('new-socket', const ResumeMessage(session: 's1'));
+      await pumpEventQueue();
+
+      expect(h.camera.isOpen, isTrue);
+      expect(h.camera.openCount, 1);
+    });
+
+    test('回到前景時沒有人在看：不開鏡頭', () async {
+      await h.controller.ensureCameraAlive();
+
+      expect(h.camera.isOpen, isFalse);
+    });
+
+    test('回到前景時有人在看、鏡頭還有畫面：什麼都不做', () async {
+      await h.join('mac-1');
       await h.controller.ensureCameraAlive();
 
       expect(h.camera.openCount, 1);
     });
 
-    test('回到前景時鏡頭拿不到畫面：關掉重開', () async {
-      await h.controller.register('教室白板');
+    test('回到前景時有人在看、鏡頭拿不到畫面：關掉重開', () async {
+      await h.join('mac-1');
       h.camera.frame = null;
       await h.controller.ensureCameraAlive();
 
       expect(h.camera.openCount, 2);
       expect(h.camera.isOpen, isTrue);
-    });
-
-    test('沒註冊時回到前景不會開鏡頭', () async {
-      await h.controller.ensureCameraAlive();
-
-      expect(h.camera.isOpen, isFalse);
+      expect(h.controller.viewerCount, 1, reason: '鄉民端沒有被結束');
     });
   });
 

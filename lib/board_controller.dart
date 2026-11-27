@@ -180,15 +180,6 @@ class BoardController extends ChangeNotifier {
       } catch (_) {
         throw const _RegisterFailure('需要相機權限才能註冊');
       }
-      // 註冊期間鏡頭一直開著，不跟著鄉民端來去開關：少一組狀態，鄉民端加入
-      // 不用等鏡頭，重建視訊連線時也不會誤關。
-      try {
-        await _openCamera();
-      } catch (e) {
-        debugPrint('開不了鏡頭：$e');
-        throw const _RegisterFailure('開不了鏡頭，請關掉其他正在用相機的程式再試一次');
-      }
-      unawaited(_applyFocus(_focus.afterCameraOpened()));
       final port = await _server.start(boardName: _session.name!);
       _port = port;
       await _advertiser.start(name: _session.name!, port: port);
@@ -196,7 +187,7 @@ class BoardController extends ChangeNotifier {
       _address = host == null ? null : '$host:$port';
       await _nameStore.save(_session.name!);
       await _screenAwake.enable();
-      debugPrint('註冊成功：${_session.name}，位址 $_address，鏡頭已開');
+      debugPrint('註冊成功：${_session.name}，位址 $_address');
     } on _RegisterFailure catch (e) {
       await _tearDown(ByeReason.boardUnregistered);
       _error = e.message;
@@ -240,13 +231,13 @@ class BoardController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 回到前景時確認鏡頭還活著。App 在背景時系統可能把鏡頭收走，註冊期間鏡頭
-  /// 又是一直開著的，不檢查的話之後有人來看就沒有畫面。
+  /// 回到前景時，有人在看的話確認鏡頭還活著。App 在背景時系統可能把鏡頭收走，
+  /// 不檢查的話鄉民端那邊會一直沒有畫面。沒有人在看時鏡頭本來就是關的，不用管。
   ///
   /// 重開之後原本的視訊連線拿的還是舊的鏡頭畫面，不在這裡處理：鄉民端發現
   /// 畫面停住會自己要求重建（[VideoRestartMessage]），那時就會用到新的。
   Future<void> ensureCameraAlive() => _serial(() async {
-    if (state == BoardState.unregistered) return;
+    if (state == BoardState.unregistered || _links.isEmpty) return;
     if (_camera.isOpen) {
       try {
         await _camera.captureFrame();
@@ -543,11 +534,13 @@ class BoardController extends ChangeNotifier {
       return;
     }
     try {
-      // 鏡頭在註冊時就開了。萬一沒開著（例如被系統收走還沒發現），這裡補開。
-      if (!_camera.isOpen) {
-        await _openCamera();
-        unawaited(_applyFocus(_focus.afterCameraOpened()));
-      }
+      // 第一個鄉民端來才開鏡頭，最後一個走就關：沒人在看時不耗電、不發熱。
+      // （2026-11-27 試過註冊就開，量不到好處，放著七小時電量從 81% 掉到 47%，改回來。）
+      final wasOpen = _camera.isOpen;
+      await _openCamera();
+      // 鏡頭剛開：把對焦套回這次註冊期間的狀態（開關、鎖住的距離）。
+      // 不等它做完：對焦最多要三秒，鄉民端等不到連線資訊會以為看板端沒回應。
+      if (!wasOpen) unawaited(_applyFocus(_focus.afterCameraOpened()));
       final link = await _createLink();
       _links[viewerId] = link;
       _recorders.joined(viewerId, join.name);
@@ -631,12 +624,11 @@ class BoardController extends ChangeNotifier {
     try {
       await opening.timeout(_cameraOpenTimeout);
     } on TimeoutException {
-      // 不等了，但鏡頭之後可能還是開起來：到時已經不在註冊中就關掉，
-      // 不能讓它一直開著。
+      // 不等了，但鏡頭之後可能還是開起來：到時沒有人在看就關掉，不能讓它一直開著。
       unawaited(
         opening.then(
           (_) => _serial(() async {
-            if (state == BoardState.unregistered) await _closeCamera();
+            if (_links.isEmpty) await _closeCamera();
           }),
           onError: (_) {},
         ),
@@ -687,7 +679,10 @@ class BoardController extends ChangeNotifier {
     await _viewerGone(viewerId);
   }
 
-  /// 一個鄉民端離開了。最後一個離開時回到等候中；鏡頭不關，註冊期間一直開著。
+  /// 一個鄉民端離開了。最後一個離開時關閉鏡頭、回到等候中。
+  ///
+  /// 重建視訊連線不會走到這裡（那位鄉民端一直都在，只是換一條連線），
+  /// 所以不會因為重建而把鏡頭關掉。
   Future<void> _viewerGone(String viewerId) async {
     _answerTimers.remove(viewerId)?.cancel();
     _graceTimers.remove(viewerId)?.cancel();
@@ -698,6 +693,7 @@ class BoardController extends ChangeNotifier {
     _recorders.left(viewerId);
     _session.viewerLeft(viewerId);
     await link?.close();
+    if (_links.isEmpty) await _closeCamera();
     notifyListeners();
   }
 
@@ -719,6 +715,7 @@ class BoardController extends ChangeNotifier {
     for (final link in links) {
       await link.close();
     }
+    await _closeCamera();
   }
 
   Future<void> _closeCamera() async {
@@ -731,7 +728,6 @@ class BoardController extends ChangeNotifier {
     // 每一項都要停，其中一項出錯不能讓其他的留著。
     for (final step in <Future<void> Function()>[
       () => _endAllViewers(reason),
-      _closeCamera,
       _advertiser.stop,
       _server.stop,
       _screenAwake.disable,
@@ -743,7 +739,7 @@ class BoardController extends ChangeNotifier {
     _session.unregister();
     _address = null;
     _port = null;
-    debugPrint('已撤銷註冊（或註冊沒成功），鏡頭已關');
+    debugPrint('已撤銷註冊（或註冊沒成功）');
   });
 
   @override
