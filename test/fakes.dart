@@ -87,6 +87,13 @@ class FakeServer implements SignalServer {
   Future<void> dismiss(String viewerId, ByeReason reason) async =>
       dismissed[viewerId] = reason;
 
+  /// 接回的紀錄：哪一條新連線接手了哪一位鄉民端。
+  final List<({String viewerId, String from})> adopted = [];
+
+  @override
+  void adopt({required String viewerId, required String from}) =>
+      adopted.add((viewerId: viewerId, from: from));
+
   @override
   Future<void> stop() async => running = false;
 }
@@ -288,8 +295,16 @@ class Harness {
   /// 鄉民端加入後最多等多久它回覆連線資訊。
   Duration answerTimeout = const Duration(seconds: 10);
 
+  /// 鄉民端的連線斷掉後多久之內還讓它接回來。
+  Duration resumeGrace = const Duration(seconds: 10);
+
+  /// 一張照片多久沒被確認就放棄。
+  Duration shotGiveUpAfter = const Duration(seconds: 10);
+
   late final BoardController controller = BoardController(
     answerTimeout: answerTimeout,
+    resumeGrace: resumeGrace,
+    shotGiveUpAfter: shotGiveUpAfter,
     advertiser: advertiser,
     server: server,
     nameStore: store,
@@ -309,14 +324,22 @@ class Harness {
     String viewerId, {
     int protocol = protocolVersion,
     String name = '',
+    String session = '',
   }) async {
-    server.receive(viewerId, JoinMessage(protocol: protocol, name: name));
+    server.receive(
+      viewerId,
+      JoinMessage(protocol: protocol, name: name, session: session),
+    );
     await pumpEventQueue();
   }
 
   /// 模擬一個鄉民端加入並開始抄錄。
-  Future<void> joinRecording(String viewerId, {String name = ''}) async {
-    await join(viewerId, name: name);
+  Future<void> joinRecording(
+    String viewerId, {
+    String name = '',
+    String session = '',
+  }) async {
+    await join(viewerId, name: name, session: session);
     server.receive(viewerId, const RecordStartMessage());
     await pumpEventQueue();
   }

@@ -239,4 +239,63 @@ void main() {
       expect(gone, hasLength(2));
     });
   });
+
+  group('換一條新的連線接回來', () {
+    test('之後的訊息走新連線，舊連線關掉也不通報離開', () async {
+      final port = await server.start(boardName: '教室白板');
+      final incoming = <ViewerMessage>[];
+      final gone = <String>[];
+      server.messages.listen(incoming.add);
+      server.disconnections.listen(gone.add);
+
+      final old = await connect(port);
+      old.socket.add(const JoinMessage(session: 's1').encode());
+      await settle();
+      final viewerId = incoming.single.viewerId;
+
+      final fresh = await connect(port);
+      fresh.socket.add(const ResumeMessage(session: 's1').encode());
+      await settle();
+      server.adopt(viewerId: viewerId, from: incoming.last.viewerId);
+      await settle();
+
+      // 看板端送給這位鄉民端的訊息，到的是新連線。
+      server.send(viewerId, const OfferMessage(sdp: 'v=0'));
+      // 新連線送來的訊息，掛的是原本那位鄉民端的編號。
+      fresh.socket.add(const RecordStartMessage().encode());
+      await settle();
+
+      expect(incoming.last.viewerId, viewerId);
+      expect(incoming.last.message, isA<RecordStartMessage>());
+      expect(fresh.received.whereType<OfferMessage>(), hasLength(1));
+      expect(old.received.whereType<OfferMessage>(), isEmpty);
+      expect(gone, isEmpty, reason: '舊連線被取代不算離開');
+
+      // 之後新連線真的斷了，才通報這位鄉民端離開。
+      await fresh.socket.close();
+      await settle();
+      expect(gone, [viewerId]);
+    });
+
+    test('被取代之後，舊連線才送到的訊息不算數', () async {
+      final port = await server.start(boardName: '教室白板');
+      final incoming = <ViewerMessage>[];
+      server.messages.listen(incoming.add);
+
+      final old = await connect(port);
+      old.socket.add(const JoinMessage(session: 's1').encode());
+      await settle();
+      final viewerId = incoming.single.viewerId;
+      final fresh = await connect(port);
+      fresh.socket.add(const ResumeMessage(session: 's1').encode());
+      await settle();
+      server.adopt(viewerId: viewerId, from: incoming.last.viewerId);
+      incoming.clear();
+
+      old.socket.add(const RecordStopMessage().encode());
+      await settle();
+
+      expect(incoming, isEmpty);
+    });
+  });
 }

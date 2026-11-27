@@ -36,7 +36,10 @@ class _BoardHomeState extends State<BoardHome> with WidgetsBindingObserver {
   /// 回到 app 時重新找一次位址：使用者多半是離開去換 Wi-Fi 或開熱點。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) widget.controller.refreshAddress();
+    if (state == AppLifecycleState.resumed) {
+      widget.controller.refreshAddress();
+      widget.controller.ensureCameraAlive();
+    }
   }
 
   @override

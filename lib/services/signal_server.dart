@@ -27,6 +27,11 @@ abstract interface class SignalServer {
   /// 告訴某個鄉民端結束了，並關掉它的連線。
   Future<void> dismiss(String viewerId, ByeReason reason);
 
+  /// 鄉民端原本那條連線卡住了，它開了一條新的（目前叫 [from]）要接回來：
+  /// 之後 [viewerId] 的訊息都走這條新連線。舊的那條直接關掉，
+  /// 而且不會從 [disconnections] 通報，因為這位鄉民端並沒有離開。
+  void adopt({required String viewerId, required String from});
+
   /// 停止接受連線，並告訴所有連著的鄉民端看板撤銷註冊了。
   /// 沒有啟動時呼叫也不會出錯。
   Future<void> stop();
@@ -60,8 +65,9 @@ class WebSocketSignalServer implements SignalServer {
   final Duration silenceTimeout;
 
   HttpServer? _server;
-  final Map<String, WebSocket> _sockets = {};
-  final Map<String, Timer> _silenceTimers = {};
+
+  /// 每個鄉民端目前用的那條連線。
+  final Map<String, _Peer> _peers = {};
   final _messages = StreamController<ViewerMessage>.broadcast();
   final _disconnections = StreamController<String>.broadcast();
   int _nextId = 1;
@@ -100,14 +106,14 @@ class WebSocketSignalServer implements SignalServer {
         return;
       }
       socket.pingInterval = _pingInterval;
-      final viewerId = 'viewer-${_nextId++}';
-      _sockets[viewerId] = socket;
-      _silenceTimers[viewerId] = Timer(silenceTimeout, () => _close(viewerId));
+      final peer = _Peer(socket, 'viewer-${_nextId++}');
+      _peers[peer.id] = peer;
+      peer.silence = Timer(silenceTimeout, () => _close(peer));
       socket.add(HelloMessage(name: boardName).encode());
       socket.listen(
-        (raw) => _receive(viewerId, raw),
-        onDone: () => _dropped(viewerId),
-        onError: (_) => _dropped(viewerId),
+        (raw) => _receive(peer, raw),
+        onDone: () => _dropped(peer),
+        onError: (_) => _dropped(peer),
         cancelOnError: true,
       );
     } catch (_) {
@@ -125,14 +131,16 @@ class WebSocketSignalServer implements SignalServer {
     if (request.headers.value('origin') != null) return HttpStatus.forbidden;
     final remote = request.connectionInfo?.remoteAddress.address;
     if (remote == null || !isLanPeer(remote)) return HttpStatus.forbidden;
-    if (_sockets.length >= maxViewers) return HttpStatus.serviceUnavailable;
+    if (_peers.length >= maxViewers) return HttpStatus.serviceUnavailable;
     return null;
   }
 
-  void _receive(String viewerId, Object? raw) {
+  void _receive(_Peer peer, Object? raw) {
+    // 這條連線已經被新的那條取代了，之後才到的訊息不算。
+    if (!identical(_peers[peer.id], peer)) return;
     // 鄉民端只會送文字訊息，而且都很短。其他的不是正常的鄉民端。
     if (raw is! String || raw.length > maxMessageLength) {
-      _close(viewerId);
+      _close(peer);
       return;
     }
     final SignalMessage message;
@@ -142,21 +150,40 @@ class WebSocketSignalServer implements SignalServer {
       // 看不懂的訊息丟掉就好，不能讓一則壞訊息弄斷整條連線。
       return;
     }
-    _silenceTimers.remove(viewerId)?.cancel();
-    _messages.add((viewerId: viewerId, message: message));
+    peer.silence?.cancel();
+    _messages.add((viewerId: peer.id, message: message));
   }
 
   /// 由我們這邊關掉一條不正常的連線，並通報它走了。
-  void _close(String viewerId) {
-    final socket = _sockets[viewerId];
-    _dropped(viewerId);
-    socket?.close(WebSocketStatus.policyViolation);
+  void _close(_Peer peer) {
+    _dropped(peer);
+    peer.socket.close(WebSocketStatus.policyViolation);
   }
 
-  /// 連線從對方那邊斷掉。我們主動關掉的連線已經先從 [_sockets] 移除，不會再通報。
-  void _dropped(String viewerId) {
-    _silenceTimers.remove(viewerId)?.cancel();
-    if (_sockets.remove(viewerId) != null) _disconnections.add(viewerId);
+  /// 連線從對方那邊斷掉。我們主動關掉的、或已經被新連線取代的，
+  /// 都已經不在 [_peers] 裡，不會再通報。
+  void _dropped(_Peer peer) {
+    peer.silence?.cancel();
+    if (!identical(_peers[peer.id], peer)) return;
+    _peers.remove(peer.id);
+    _disconnections.add(peer.id);
+  }
+
+  @override
+  void adopt({required String viewerId, required String from}) {
+    final fresh = _peers.remove(from);
+    if (fresh == null || from == viewerId) {
+      if (fresh != null) _peers[from] = fresh;
+      return;
+    }
+    final stale = _peers[viewerId];
+    fresh.id = viewerId;
+    _peers[viewerId] = fresh;
+    if (stale != null) {
+      stale.silence?.cancel();
+      // 舊的那條多半已經卡住，正常的關閉流程可能等不到對方回應，這裡不等它。
+      unawaited(stale.socket.close().catchError((Object _) {}));
+    }
   }
 
   Future<HttpServer> _bind() async {
@@ -170,28 +197,41 @@ class WebSocketSignalServer implements SignalServer {
 
   @override
   void send(String viewerId, SignalMessage message) =>
-      _sockets[viewerId]?.add(message.encode());
+      _peers[viewerId]?.socket.add(message.encode());
 
   @override
   void sendBytes(String viewerId, Uint8List bytes) =>
-      _sockets[viewerId]?.add(bytes);
+      _peers[viewerId]?.socket.add(bytes);
 
   @override
   Future<void> dismiss(String viewerId, ByeReason reason) async {
-    final socket = _sockets.remove(viewerId);
-    _silenceTimers.remove(viewerId)?.cancel();
-    if (socket == null) return;
-    socket.add(ByeMessage(reason).encode());
-    await socket.close();
+    final peer = _peers.remove(viewerId);
+    if (peer == null) return;
+    peer.silence?.cancel();
+    peer.socket.add(ByeMessage(reason).encode());
+    await peer.socket.close();
   }
 
   @override
   Future<void> stop() async {
     final server = _server;
     _server = null;
-    for (final viewerId in _sockets.keys.toList()) {
+    for (final viewerId in _peers.keys.toList()) {
       await dismiss(viewerId, ByeReason.boardUnregistered);
     }
     await server?.close(force: true);
   }
+}
+
+/// 一條連進來的連線，以及它目前代表哪一位鄉民端。
+class _Peer {
+  _Peer(this.socket, this.id);
+
+  final WebSocket socket;
+
+  /// 這條連線代表的鄉民端。接回（[SignalServer.adopt]）時會改成原本那位的。
+  String id;
+
+  /// 連上之後一直不說話就關掉用的計時。
+  Timer? silence;
 }
