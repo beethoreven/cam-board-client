@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <application
-        android:label="看板端"
+        android:label="鄉民看板"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

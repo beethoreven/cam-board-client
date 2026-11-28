@@ -39,7 +39,7 @@ class CamBoardApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '看板端',
+      title: '鄉民看板',
       home: BoardHome(controller: controller),
     );
   }

@@ -54,7 +54,7 @@ class _BoardHomeState extends State<BoardHome> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final controller = widget.controller;
     return Scaffold(
-      appBar: AppBar(title: const Text('看板端')),
+      appBar: AppBar(title: const Text('鄉民看板')),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24),
