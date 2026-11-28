@@ -1,8 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
+
+// 正式版的簽章金鑰。金鑰和密碼都不放進版本控制：`android/key.properties`
+// （已經在 .gitignore 裡）寫著金鑰檔的位置和密碼，格式見 `android/key.properties.example`。
+// 這個檔案不存在時（例如剛把專案抓下來），正式版退回用開發用的金鑰簽章，
+// 建得出來、裝得起來，但跟用正式金鑰簽的版本不能互相更新。
+val keyProperties = Properties().apply {
+    val file = rootProject.file("key.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+val hasReleaseKey = keyProperties.getProperty("storeFile") != null
 
 android {
     namespace = "tw.com.tutorarthur.camboard.client"
@@ -29,11 +41,20 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(keyProperties.getProperty("storeFile"))
+                storePassword = keyProperties.getProperty("storePassword")
+                keyAlias = keyProperties.getProperty("keyAlias")
+                keyPassword = keyProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 }

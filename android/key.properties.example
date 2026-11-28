@@ -1,0 +1,8 @@
+# 看板端正式版的簽章設定。複製成 key.properties 再填，key.properties 不會進版本控制。
+#
+# storeFile 是金鑰檔的完整路徑。金鑰檔請放在專案資料夾以外，並且另外備份：
+# 弄丟的話，之後的新版沒辦法直接更新已經裝在手機上的舊版，要先移除再裝。
+storeFile=/Users/你的帳號/Keys/cam-board/cam-board-client-release.jks
+storePassword=產生金鑰時設的密碼
+keyAlias=cam-board-client
+keyPassword=產生金鑰時設的密碼
