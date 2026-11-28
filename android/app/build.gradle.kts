@@ -12,7 +12,8 @@ plugins {
 // 建得出來、裝得起來，但跟用正式金鑰簽的版本不能互相更新。
 val keyProperties = Properties().apply {
     val file = rootProject.file("key.properties")
-    if (file.exists()) file.inputStream().use { load(it) }
+    // 用 UTF-8 讀：預設的讀法遇到中文（例如路徑裡的字）會變成亂碼。
+    if (file.exists()) file.reader(Charsets.UTF_8).use { load(it) }
 }
 val hasReleaseKey = keyProperties.getProperty("storeFile") != null
 
